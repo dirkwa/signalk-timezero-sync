@@ -315,6 +315,75 @@ describe("resources bridge", () => {
       expect(offers).toEqual([newRoute(1)]);
     });
 
+    test("a route still waiting to be pulled keeps its place after a restart", async () => {
+      const count = { live: 199 as number | null };
+      const makeBridge = (offers: string[]) => {
+        const peer = makePeer();
+        vi.spyOn(peer, "liveRouteCount").mockImplementation(
+          async () => count.live,
+        );
+        vi.spyOn(peer, "rejoin").mockImplementation(() => {});
+        const real = peer.offer.bind(peer);
+        vi.spyOn(peer, "offer").mockImplementation((objs) => {
+          offers.push(...objs.map((o) => o.guid));
+          real(objs);
+        });
+        const { app } = mockApp(() => {});
+        (app as unknown as { setPluginStatus: () => void }).setPluginStatus =
+          () => {};
+        const bridge = new ResourcesBridge(app, peer, {
+          types: ["routes"],
+          stateFile: path.join(dir, "resources.json"),
+          offerExisting: true,
+          maxRoutes: 200,
+        });
+        return bridge;
+      };
+      const first: string[] = [];
+      const before = makeBridge(first);
+      before.onResourceDelta("routes", newRoute(1), route);
+      await vi.runAllTimersAsync();
+      expect(first).toEqual([newRoute(1)]);
+      // Restart: TimeZero has not pulled route 1, so its place is still taken.
+      const second: string[] = [];
+      const after = makeBridge(second);
+      after.onResourceDelta("routes", newRoute(2), route);
+      await vi.runAllTimersAsync();
+      expect(second).toEqual([]);
+    });
+
+    test("two changes at once cannot both take the last place", async () => {
+      const { peer, bridge, store, offers } = setup(true, 199);
+      // Both counts arrive in the same instant, so without serialising the
+      // two commits both would see one free place.
+      let answer!: () => void;
+      const gate = new Promise<void>((r) => (answer = r));
+      vi.mocked(peer.liveRouteCount).mockImplementation(() =>
+        gate.then(() => 199),
+      );
+      store.routes![newRoute(2)] = route;
+      bridge.onResourceDelta("routes", newRoute(1), route);
+      await vi.advanceTimersByTimeAsync(1100); // the first change settles
+      const reconciling = bridge.reconcile();
+      await vi.advanceTimersByTimeAsync(10);
+      answer();
+      await vi.runAllTimersAsync();
+      await reconciling;
+      expect(offers).toHaveLength(1);
+    });
+
+    test("a held-back route is retried even when existing routes are not sent", async () => {
+      const { peer, bridge, store, offers, count } = setup(false, 200);
+      bridge.onResourceDelta("routes", newRoute(1), route);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([]);
+      store.routes![newRoute(1)] = route;
+      count.live = 150;
+      peer.emit("pulled", ["something-else"]);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([newRoute(1)]);
+    });
+
     test("a held-back route is sent on a later start", async () => {
       const { bridge, store, offers, count } = setup(true, 200);
       store.routes![newRoute(1)] = route;

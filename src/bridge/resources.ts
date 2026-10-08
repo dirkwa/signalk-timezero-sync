@@ -51,20 +51,36 @@ interface Candidate {
 
 const CHANGE_SETTLE_MS = 1000;
 
+interface SavedState {
+  known: Record<string, Known>;
+  // New routes offered but not yet pulled: each holds one of TimeZero's
+  // places until it is pulled, across restarts too.
+  awaitingNew: string[];
+  // New routes held back for lack of room, retried when room may open up.
+  held: string[];
+}
+
 export class ResourcesBridge {
   private known: Record<string, Known>;
+  private awaitingNew: Set<string>;
+  private held: Set<string>;
   private pending = new Map<string, { type: SyncedType; value: unknown }>();
-  // New routes offered but not yet pulled: they count against the limit.
-  private awaitingNew = new Set<string>();
-  private heldBack = false;
   private flushTimer: NodeJS.Timeout | null = null;
+  // Room is checked and reserved one commit at a time, or two commits could
+  // both take TimeZero's last place.
+  private commits: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly app: ServerAPI,
     private readonly peer: TimeZeroPeer,
     private readonly opts: ResourcesBridgeOptions,
   ) {
-    this.known = loadKnown(opts.stateFile);
+    const saved = loadState(opts.stateFile);
+    this.known = saved.known;
+    this.awaitingNew = new Set(
+      saved.awaitingNew.filter((g) => peer.isPending(g)),
+    );
+    this.held = new Set(saved.held);
     peer.on("objects", (objects) => void this.fromTimeZero(objects));
     peer.on("pulled", (guids) => {
       guids.forEach((g) => this.awaitingNew.delete(g));
@@ -75,7 +91,7 @@ export class ResourcesBridge {
   // Routes held back for TimeZero's limit go once there may be room: after a
   // pull, or after TimeZero sent deletions.
   private retryHeld(): void {
-    if (this.heldBack) void this.reconcile();
+    if (this.held.size) void this.reconcile();
   }
 
   stop(): void {
@@ -142,6 +158,7 @@ export class ResourcesBridge {
     const now = new Date();
     const candidates: Candidate[] = [];
     for (const [id, { type, value }] of this.pending) {
+      if (value === null) this.held.delete(id);
       const c = this.candidate(type, id, value as Route | Waypoint | null, now);
       if (c) candidates.push(c);
     }
@@ -190,18 +207,27 @@ export class ResourcesBridge {
   // On a Furuno NavNet, TimeZero holds at most 200 routes and makes room for
   // a new one by deleting the route modified longest ago, on every device it
   // syncs with. So a new Signal K route is only sent while there is room.
-  private async commit(candidates: Candidate[]): Promise<void> {
+  private commit(candidates: Candidate[]): Promise<void> {
+    const run = this.commits.then(() => this.commitNow(candidates));
+    this.commits = run.catch(() => {});
+    return run;
+  }
+
+  private async commitNow(candidates: Candidate[]): Promise<void> {
     const newRoutes = candidates.filter((c) => c.newRoute);
     let accepted = candidates.filter((c) => !c.newRoute);
     if (newRoutes.length) {
       const room = await this.routeRoom();
-      accepted = accepted.concat(newRoutes.slice(0, room));
-      const held = newRoutes.length - Math.min(room, newRoutes.length);
-      this.heldBack = held > 0;
-      if (held)
+      const fits = newRoutes.slice(0, room);
+      const held = newRoutes.slice(room);
+      accepted = accepted.concat(fits);
+      fits.forEach((c) => this.held.delete(c.obj.guid));
+      held.forEach((c) => this.held.add(c.obj.guid));
+      if (held.length)
         this.app.setPluginStatus(
-          `${held} new route(s) not sent: TimeZero is at its ${this.opts.maxRoutes}-route limit`,
+          `${held.length} new route(s) not sent: TimeZero is at its ${this.opts.maxRoutes}-route limit`,
         );
+      if (held.length && !accepted.length) this.save();
     }
     if (!accepted.length) return;
     for (const c of accepted) c.record();
@@ -233,7 +259,8 @@ export class ResourcesBridge {
         continue;
       }
       for (const [id, resource] of Object.entries(resources)) {
-        if (!this.known[id] && !this.opts.offerExisting) continue;
+        if (!this.known[id] && !this.opts.offerExisting && !this.held.has(id))
+          continue;
         const c = this.candidate(type, id, resource as Route | Waypoint, now);
         if (c) candidates.push(c);
       }
@@ -242,6 +269,9 @@ export class ResourcesBridge {
         const c = this.candidate(type, id, null, now);
         if (c) candidates.push(c);
       }
+      if (type === "routes")
+        for (const id of this.held)
+          if (!(id in resources)) this.held.delete(id);
     }
     await this.commit(candidates);
   }
@@ -249,7 +279,12 @@ export class ResourcesBridge {
   private save(): void {
     try {
       const tmp = `${this.opts.stateFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(this.known));
+      const state: SavedState = {
+        known: this.known,
+        awaitingNew: [...this.awaitingNew],
+        held: [...this.held],
+      };
+      fs.writeFileSync(tmp, JSON.stringify(state));
       fs.renameSync(tmp, this.opts.stateFile);
     } catch (err) {
       this.app.error(`saving resource sync state: ${(err as Error).message}`);
@@ -257,10 +292,15 @@ export class ResourcesBridge {
   }
 }
 
-function loadKnown(file: string): Record<string, Known> {
+function loadState(file: string): SavedState {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, Known>;
+    const s = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<SavedState>;
+    return {
+      known: s.known ?? {},
+      awaitingNew: s.awaitingNew ?? [],
+      held: s.held ?? [],
+    };
   } catch {
-    return {};
+    return { known: {}, awaitingNew: [], held: [] };
   }
 }
