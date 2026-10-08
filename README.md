@@ -1,0 +1,80 @@
+# TimeZero Sync for Signal K
+
+Keeps Signal K and [TimeZero](https://mytimezero.com/) (TZ Professional and TZ
+iBoat) in step over TimeZero's own LAN sync, the same way two TimeZero
+installations sync with each other:
+
+|                                 | TimeZero → Signal K | Signal K → TimeZero |
+| ------------------------------- | ------------------- | ------------------- |
+| Routes                          | ✓                   | ✓                   |
+| Marks / waypoints               | ✓                   | ✓                   |
+| Go-to                           | ✓                   | ✓                   |
+| Active route and its next point | ✓                   | ✓                   |
+| Cancel navigation               | ✓                   | ✓                   |
+| Anchor watch (circle)           | ✓                   | ✓                   |
+
+On the Signal K side it uses the standard Resources API, Course API and anchor
+paths, so Freeboard-SK and every other Signal K chart app sees TimeZero's routes
+and course, and their changes reach TimeZero.
+
+## Requirements
+
+- Signal K server 2.x with a resources provider (the bundled
+  `@signalk/resources-provider` is fine) for routes and waypoints.
+- For the anchor watch: an anchor alarm plugin that accepts
+  `PUT navigation.anchor.position`, such as Hoeken's Anchor Alarm. **Turn off its
+  own "Sync Anchor with TimeZero"**: only one plugin can talk to TimeZero, and
+  this one takes over the anchor sync.
+- The network: TimeZero syncs without an account only with devices on a Furuno
+  NavNet address (172.31.x.x). If the Signal K server has one, leave the user ID
+  blank. On an ordinary LAN, TimeZero only syncs with peers that share its
+  My TIMEZERO user ID; enter it in the plugin settings (experimental).
+
+## How it works
+
+The plugin joins TimeZero's sync as a peer named after the "Name shown in
+TimeZero" setting. TimeZero stays the sync master.
+
+- **Routes and waypoints** use the TimeZero GUID as the Signal K resource id, so
+  each object is the same on both sides. TimeZero sends its routes and marks
+  when the plugin joins, and the plugin reads later edits as TimeZero announces
+  them. A route or waypoint created, edited or deleted in Signal K is offered to
+  TimeZero, which collects it the next time the plugin joins. To make that
+  happen, the plugin goes quiet for the "rejoin pause" (default 60 s) until
+  TimeZero drops it, then rejoins.
+- **Navigation**: TimeZero's go-to and active route map to the Signal K Course
+  API both ways. A route has to exist on both sides before it can be activated,
+  so activating a new Signal K route waits until TimeZero has collected it.
+- **Anchor watch**: the anchor plugin's position and radius go to TimeZero, and
+  a drop or raise in TimeZero is applied through the anchor plugin.
+
+State that has to survive a restart (the peer id and sync ticks) is kept in the
+plugin's data directory, so a restart neither makes TimeZero re-send everything
+nor lets its older state overwrite a newer one.
+
+## Limitations
+
+- TimeZero marks and routes in user layers are left alone.
+- Areas, circles, lines, events and tracks are not synced.
+- TimeZero has no reverse flag, so a route followed in reverse in Signal K is not
+  sent to TimeZero.
+- TimeZero's anchor watch is a circle; polygon and sector anchor zones are not
+  sent.
+- Signal K changes reach TimeZero after the rejoin pause, not instantly.
+
+## Development
+
+```sh
+npm install
+npm test
+npm run build
+node test/e2e/run.mjs --image ghcr.io/signalk/signalk-server:latest --anchor-plugin ../hoekens-anchor-alarm
+```
+
+The end-to-end test runs a real Signal K server against a fake TimeZero master
+on a private podman network. See [AGENTS.md](AGENTS.md) for what the plugin
+relies on in TimeZero's sync, and the rules for testing against a real one.
+
+## License
+
+MIT
