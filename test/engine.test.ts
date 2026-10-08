@@ -386,6 +386,39 @@ describe("anchor watch", () => {
   });
 });
 
+describe("TimeZero joining", () => {
+  test("announces a TimeZero once when it appears", () => {
+    const peer = makePeer();
+    recordRequests(peer, () => ({ status: 409, body: "" }));
+    let joined = 0;
+    peer.on("joined", () => joined++);
+    peer.onBeacon(tzBeacon({}), TZ_ADDRESS);
+    peer.onBeacon(tzBeacon({}), TZ_ADDRESS);
+    expect(joined).toBe(1);
+  });
+});
+
+describe("TimeZero's route count", () => {
+  // From a TZ Professional 5.0 sync diagnostics page.
+  const PAGE =
+    '<h2>User Objects Information</h2>\r\n<table class="full-size"><tr><th>Name</th><th>Live Count</th><th>Deleted Count</th></tr>\r\n<tr><td>Marks</td><td>742</td><td>87</td></tr><tr><td>Routes</td><td>200</td><td>329</td></tr><tr><td>Areas</td><td>2</td><td>3</td></tr>';
+
+  test("reads the live route count from TimeZero's diagnostics page", async () => {
+    const peer = makePeer();
+    recordRequests(peer, () => ({ status: 200, body: PAGE }));
+    peer.onBeacon(tzBeacon({ table: 0 }), TZ_ADDRESS);
+    expect(await peer.liveRouteCount()).toBe(200);
+  });
+
+  test("gives no count when the page has changed or no TimeZero is present", async () => {
+    const peer = makePeer();
+    expect(await peer.liveRouteCount()).toBeNull();
+    recordRequests(peer, () => ({ status: 200, body: "<html>other</html>" }));
+    peer.onBeacon(tzBeacon({ table: 0 }), TZ_ADDRESS);
+    expect(await peer.liveRouteCount()).toBeNull();
+  });
+});
+
 describe("the sync endpoint", () => {
   test("refuses hosts outside NavNet when no user id is set", async () => {
     const peer = makePeer();

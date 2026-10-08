@@ -28,6 +28,13 @@ const ConfigSchema = Type.Object({
       "On start, offer TimeZero the routes and waypoints it has never had. When off, only ones created or edited while the plugin runs are sent.",
     default: true,
   }),
+  maxRoutes: Type.Number({
+    title: "TimeZero route limit",
+    description:
+      "On a Furuno NavNet, TimeZero keeps at most 200 routes and deletes the route modified longest ago to make room for a new one, on every device it syncs with. New Signal K routes are only sent while TimeZero has room. 0 turns the check off.",
+    default: 200,
+    minimum: 0,
+  }),
   syncNavigation: Type.Boolean({
     title: "Sync the active route and go-to",
     default: true,
@@ -119,6 +126,7 @@ export default function (app: ServerAPI): Plugin {
           types,
           stateFile: path.join(dataDir, "resources.json"),
           offerExisting: config.offerExisting !== false,
+          maxRoutes: config.maxRoutes ?? 200,
         });
       if (config.syncNavigation !== false) course = new CourseBridge(app, peer);
       if (config.syncAnchor !== false) anchor = new AnchorBridge(app, peer);
@@ -140,7 +148,13 @@ export default function (app: ServerAPI): Plugin {
         .start()
         .then(() => {
           app.setPluginStatus(`Syncing as ${running.hostId.split("/")[0]}`);
-          void resources?.reconcile();
+          // Checked once TimeZero is there to count its routes, and again
+          // whenever it comes back. Offers still waiting from before a
+          // restart need a rejoin: a quick restart goes unnoticed by TimeZero.
+          running.on("joined", () => {
+            if (running.hasUnpulledOffers) running.rejoin();
+            void resources?.reconcile();
+          });
         })
         .catch((err: NodeJS.ErrnoException) => {
           const message =

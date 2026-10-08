@@ -123,6 +123,7 @@ function serverHome() {
     hostName: "SignalK-E2E",
     userId: USER_ID,
     rejoinPauseSeconds: 12,
+    maxRoutes: 2,
   });
   plugin("resources-provider", {
     standard: { routes: true, waypoints: true, notes: true, regions: true },
@@ -244,6 +245,8 @@ async function main() {
     `USER_ID=${USER_ID}`,
     "--env",
     "BROADCAST=10.89.201.255",
+    "--env",
+    "MAX_ROUTES=2",
     "--entrypoint",
     "node",
     IMAGE,
@@ -353,6 +356,35 @@ async function main() {
     30000,
   );
 
+  console.log("== TimeZero's route limit (2 in this test)");
+  const createdC = await send(
+    "POST",
+    `${API}/signalk/v2/api/resources/routes`,
+    {
+      name: "SK Route C",
+      feature: {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [177.2, -17.8],
+            [177.21, -17.8],
+          ],
+        },
+        properties: {},
+      },
+    },
+  );
+  const routeC = createdC.json?.id;
+  await sleep(30000);
+  const atLimit = await tz();
+  check(
+    "a new route is held back while TimeZero is full",
+    !atLimit.objects.some((o) => o.guid === routeC) &&
+      atLimit.failures.length === 0,
+    JSON.stringify(atLimit.failures),
+  );
+
   console.log("== TimeZero -> Signal K: an edit outside a sync round");
   await tz("/route", {
     guid: ROUTE_A,
@@ -420,10 +452,18 @@ async function main() {
       "the anchor survives the restart",
       (await anchorPosition())?.latitude !== undefined,
     );
+  // Route B was deleted, so route C now fits and goes on start.
+  await waitFor(
+    "the held-back route reaches TimeZero once there is room",
+    async () =>
+      (await tz()).objects.some((o) => o.guid === routeC && o.deleted === 0),
+    90000,
+  );
+  const end = await tz();
   check(
-    "Signal K never pushed a UserObject table",
-    after.failures.length === 0,
-    after.failures.join("; "),
+    "TimeZero never had to delete a route, and no table was pushed to it",
+    end.failures.length === 0,
+    end.failures.join("; "),
   );
 
   stopFeed();
@@ -438,7 +478,7 @@ main()
   .finally(() => {
     try {
       console.log(
-        "\n-- server log (tail) --\n" + podman("logs", "--tail", "25", SK),
+        "\n-- server log (tail) --\n" + podman("logs", "--tail", "120", SK),
       );
     } catch {
       /* no server */

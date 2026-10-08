@@ -36,6 +36,9 @@ const NAME = "NAVSTATION";
 const UUID = crypto.randomUUID();
 const HOST_ID = `${NAME}/${UUID}`;
 const PEER_GONE_MS = 8000;
+// On a Furuno NavNet TimeZero keeps at most 200 routes and deletes the route
+// modified longest ago to make room for a new one.
+const MAX_ROUTES = Number(process.env.MAX_ROUTES || 200);
 
 const s = {
   currentTick: 1000,
@@ -218,6 +221,7 @@ async function round(address) {
     for (const o of pulled.Objects) {
       s.objects.set(o.Guid, { ...o, Tick: ++s.currentTick });
       log(`round: pulled ${o.Guid} deleted=${parseRow(o.Values)[10]}`);
+      trimRoutes();
     }
     const ours = [...s.objects.values()].filter((o) => o.Tick > record);
     await request(
@@ -259,6 +263,29 @@ async function round(address) {
       `/LanSynchronizationApi/ReleaseLock?NetworkID=${id}`,
     ).catch(() => {});
   }
+}
+
+function liveRoutes() {
+  return [...s.objects.values()].filter((o) => {
+    const v = parseRow(o.Values);
+    return v[0] === 5 && v[10] === 0;
+  });
+}
+
+function trimRoutes() {
+  const live = liveRoutes();
+  if (live.length <= MAX_ROUTES) return;
+  const oldest = live.sort(
+    (a, b) => parseRow(a.Values)[3] - parseRow(b.Values)[3],
+  )[0];
+  const v = parseRow(oldest.Values);
+  v[10] = 1;
+  s.objects.set(oldest.Guid, {
+    ...oldest,
+    Tick: ++s.currentTick,
+    Values: formatRow(v),
+  });
+  s.failures.push(`route limit: deleted ${oldest.Guid} to make room`);
 }
 
 // ---- our own sync endpoint ----------------------------------------------------
@@ -326,6 +353,17 @@ http
         return res.writeHead(201).end();
       }
       if (p.endsWith("/FishIt") && req.method === "GET") return json(s.fishIt);
+      if (p === "/LanSynchronizationApi/" || p === "/LanSynchronizationApi") {
+        const routes = [...s.objects.values()].filter(
+          (o) => parseRow(o.Values)[0] === 5,
+        );
+        const live = liveRoutes().length;
+        return res
+          .writeHead(200, { "Content-Type": "text/html" })
+          .end(
+            `<h2>User Objects Information</h2>\r\n<table class="full-size"><tr><th>Name</th><th>Live Count</th><th>Deleted Count</th></tr>\r\n<tr><td>Routes</td><td>${live}</td><td>${routes.length - live}</td></tr></table>`,
+          );
+      }
       res.writeHead(200).end();
     });
   })

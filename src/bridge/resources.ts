@@ -39,6 +39,14 @@ export interface ResourcesBridgeOptions {
   stateFile: string;
   // Offer Signal K resources TimeZero has never had, on start.
   offerExisting: boolean;
+  // TimeZero's route limit; 0 for none.
+  maxRoutes: number;
+}
+
+interface Candidate {
+  obj: Omit<UserObject, "tick">;
+  newRoute: boolean;
+  record: () => void;
 }
 
 const CHANGE_SETTLE_MS = 1000;
@@ -46,6 +54,9 @@ const CHANGE_SETTLE_MS = 1000;
 export class ResourcesBridge {
   private known: Record<string, Known>;
   private pending = new Map<string, { type: SyncedType; value: unknown }>();
+  // New routes offered but not yet pulled: they count against the limit.
+  private awaitingNew = new Set<string>();
+  private heldBack = false;
   private flushTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -55,6 +66,16 @@ export class ResourcesBridge {
   ) {
     this.known = loadKnown(opts.stateFile);
     peer.on("objects", (objects) => void this.fromTimeZero(objects));
+    peer.on("pulled", (guids) => {
+      guids.forEach((g) => this.awaitingNew.delete(g));
+      this.retryHeld();
+    });
+  }
+
+  // Routes held back for TimeZero's limit go once there may be room: after a
+  // pull, or after TimeZero sent deletions.
+  private retryHeld(): void {
+    if (this.heldBack) void this.reconcile();
   }
 
   stop(): void {
@@ -101,6 +122,7 @@ export class ResourcesBridge {
       }
     }
     this.save();
+    if (objects.some(isDeleted)) this.retryHeld();
   }
 
   // ---- Signal K -> TimeZero ----------------------------------------------
@@ -118,32 +140,32 @@ export class ResourcesBridge {
   private flush(): void {
     this.flushTimer = null;
     const now = new Date();
-    const offers: Omit<UserObject, "tick">[] = [];
+    const candidates: Candidate[] = [];
     for (const [id, { type, value }] of this.pending) {
-      const offer = this.toOffer(
-        type,
-        id,
-        value as Route | Waypoint | null,
-        now,
-      );
-      if (offer) offers.push(offer);
+      const c = this.candidate(type, id, value as Route | Waypoint | null, now);
+      if (c) candidates.push(c);
     }
     this.pending.clear();
-    this.commit(offers);
+    void this.commit(candidates);
   }
 
-  private toOffer(
+  // What to offer for a Signal K change, without recording anything yet: a
+  // new route may still be held back by TimeZero's route limit.
+  private candidate(
     type: SyncedType,
     id: string,
     resource: Route | Waypoint | null,
     now: Date,
-  ): Omit<UserObject, "tick"> | null {
+  ): Candidate | null {
     const known = this.known[id];
     const previous = known ? parseUserObject(known.tz) : undefined;
     if (resource === null) {
       if (!previous) return null;
-      delete this.known[id];
-      return tombstone(previous, now);
+      return {
+        obj: tombstone(previous, now),
+        newRoute: false,
+        record: () => delete this.known[id],
+      };
     }
     const print = fingerprint(type, resource);
     if (known?.fingerprint === print) return null;
@@ -152,26 +174,56 @@ export class ResourcesBridge {
         ? fromSkRoute(id, resource as Route, previous, now)
         : fromSkWaypoint(id, resource as Waypoint, previous, now);
     if (!obj) return null;
-    this.known[id] = {
-      type,
-      fingerprint: print,
-      tz: formatUserObject({ ...obj, tick: 0 }),
+    return {
+      obj,
+      newRoute: type === "routes" && !known,
+      record: () => {
+        this.known[id] = {
+          type,
+          fingerprint: print,
+          tz: formatUserObject({ ...obj, tick: 0 }),
+        };
+      },
     };
-    return obj;
   }
 
-  private commit(offers: Omit<UserObject, "tick">[]): void {
-    if (!offers.length) return;
+  // On a Furuno NavNet, TimeZero holds at most 200 routes and makes room for
+  // a new one by deleting the route modified longest ago, on every device it
+  // syncs with. So a new Signal K route is only sent while there is room.
+  private async commit(candidates: Candidate[]): Promise<void> {
+    const newRoutes = candidates.filter((c) => c.newRoute);
+    let accepted = candidates.filter((c) => !c.newRoute);
+    if (newRoutes.length) {
+      const room = await this.routeRoom();
+      accepted = accepted.concat(newRoutes.slice(0, room));
+      const held = newRoutes.length - Math.min(room, newRoutes.length);
+      this.heldBack = held > 0;
+      if (held)
+        this.app.setPluginStatus(
+          `${held} new route(s) not sent: TimeZero is at its ${this.opts.maxRoutes}-route limit`,
+        );
+    }
+    if (!accepted.length) return;
+    for (const c of accepted) c.record();
+    for (const c of accepted) if (c.newRoute) this.awaitingNew.add(c.obj.guid);
     this.save();
-    this.peer.offer(offers);
-    this.app.debug(`offered ${offers.length} object(s) to TimeZero`);
+    this.peer.offer(accepted.map((c) => c.obj));
+    this.app.debug(`offered ${accepted.length} object(s) to TimeZero`);
     this.peer.rejoin();
+  }
+
+  private async routeRoom(): Promise<number> {
+    if (this.opts.maxRoutes <= 0) return Number.MAX_SAFE_INTEGER;
+    const live = await this.peer.liveRouteCount();
+    // Without TimeZero's count, sending a new route could cost an old one.
+    if (live === null) return 0;
+    return Math.max(0, this.opts.maxRoutes - live - this.awaitingNew.size);
   }
 
   // Resources changed while the plugin was off, or never synced at all.
   async reconcile(): Promise<void> {
     const now = new Date();
-    const offers: Omit<UserObject, "tick">[] = [];
+    const candidates: Candidate[] = [];
     for (const type of this.opts.types) {
       let resources: Record<string, unknown>;
       try {
@@ -182,16 +234,16 @@ export class ResourcesBridge {
       }
       for (const [id, resource] of Object.entries(resources)) {
         if (!this.known[id] && !this.opts.offerExisting) continue;
-        const offer = this.toOffer(type, id, resource as Route | Waypoint, now);
-        if (offer) offers.push(offer);
+        const c = this.candidate(type, id, resource as Route | Waypoint, now);
+        if (c) candidates.push(c);
       }
       for (const [id, known] of Object.entries(this.known)) {
         if (known.type !== type || id in resources) continue;
-        const offer = this.toOffer(type, id, null, now);
-        if (offer) offers.push(offer);
+        const c = this.candidate(type, id, null, now);
+        if (c) candidates.push(c);
       }
     }
-    this.commit(offers);
+    await this.commit(candidates);
   }
 
   private save(): void {

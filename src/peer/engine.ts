@@ -73,6 +73,8 @@ export interface PeerEvents {
   anchor: [Anchor | null];
   // Objects TimeZero pulled from us, by guid.
   pulled: [string[]];
+  // A trusted TimeZero is on the network again (or for the first time).
+  joined: [];
   status: [string];
 }
 
@@ -273,10 +275,12 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     const beacon = parseBeacon(message);
     if (!beacon || beacon.uuid === this.state.uuid) return;
     const known = this.peers.get(address);
+    const wasPresent = this.timeZeroAddress() !== null;
     this.peers.set(address, { ...beacon, address, lastSeen: Date.now() });
     if (!known)
       this.opts.debug(`peer ${beacon.name} (${address}) ${beacon.deviceType}`);
     if (!this.isTrusted(address) || !isTimeZero(beacon)) return;
+    if (!wasPresent) this.emit("joined");
 
     if (beacon.routeTick > this.state.routeTick)
       void this.pullNavigation(address);
@@ -304,6 +308,33 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     if (address.startsWith("172.31.")) return true;
     if (!this.opts.userId) return false;
     return this.peers.get(address)?.userId === this.opts.userId;
+  }
+
+  // A trusted TimeZero that is on the network now.
+  private timeZeroAddress(): string | null {
+    const now = Date.now();
+    for (const p of this.peers.values())
+      if (
+        now - p.lastSeen <= PEER_STALE_MS &&
+        isTimeZero(p) &&
+        this.isTrusted(p.address)
+      )
+        return p.address;
+    return null;
+  }
+
+  // TimeZero's own count of live routes, layers included, from its sync
+  // diagnostics page. null when there is no TimeZero or the page has changed.
+  async liveRouteCount(): Promise<number | null> {
+    const address = this.timeZeroAddress();
+    if (!address) return null;
+    try {
+      const res = await this.request(address, "GET", `${API}/`);
+      const m = /<td>Routes<\/td>\s*<td>(\d+)<\/td>/.exec(res.body);
+      return m ? Number(m[1]) : null;
+    } catch {
+      return null;
+    }
   }
 
   // ---- pulls and pushes ---------------------------------------------------

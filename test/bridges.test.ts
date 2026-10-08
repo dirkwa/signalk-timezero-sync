@@ -185,8 +185,10 @@ describe("resources bridge", () => {
   const tzRoute = () =>
     asObject(fromSkRoute(ID, route, undefined, NOW)!, 33430);
 
-  function setup(offerExisting = true) {
+  function setup(offerExisting = true, liveRoutes: number | null = 150) {
     const peer = makePeer();
+    const count = { live: liveRoutes };
+    vi.spyOn(peer, "liveRouteCount").mockImplementation(async () => count.live);
     const offers: string[] = [];
     vi.spyOn(peer, "offer").mockImplementation((objs) =>
       offers.push(...objs.map((o) => o.guid)),
@@ -201,9 +203,13 @@ describe("resources bridge", () => {
       types: ["routes", "waypoints"],
       stateFile: path.join(dir, "resources.json"),
       offerExisting,
+      maxRoutes: 200,
     });
     ref.bridge = bridge;
-    return { peer, bridge, store, offers };
+    const status = vi.fn();
+    (app as unknown as { setPluginStatus: typeof status }).setPluginStatus =
+      status;
+    return { peer, bridge, store, offers, count, status };
   }
 
   test("writes a TimeZero route into Signal K and does not echo it back", async () => {
@@ -250,6 +256,74 @@ describe("resources bridge", () => {
     store.routes![ID] = route;
     await bridge.reconcile();
     expect(offers).toEqual([ID]);
+  });
+
+  describe("TimeZero's route limit", () => {
+    const newRoute = (n: number) =>
+      `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+
+    test("holds back a new route when TimeZero has no room", async () => {
+      const { bridge, offers, status } = setup(true, 200);
+      bridge.onResourceDelta("routes", newRoute(1), route);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([]);
+      expect(status).toHaveBeenCalledWith(
+        expect.stringContaining("200-route limit"),
+      );
+    });
+
+    test("sends it once there is room, and counts routes still to be pulled", async () => {
+      const { bridge, offers, count } = setup(true, 199);
+      bridge.onResourceDelta("routes", newRoute(1), route);
+      bridge.onResourceDelta("routes", newRoute(2), route);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([newRoute(1)]);
+      // Route 1 is not pulled yet, so it still takes the last place.
+      count.live = 199;
+      bridge.onResourceDelta("routes", newRoute(2), route);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([newRoute(1)]);
+    });
+
+    test("sends nothing new when TimeZero's count cannot be read", async () => {
+      const { bridge, offers } = setup(true, null);
+      bridge.onResourceDelta("routes", newRoute(1), route);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([]);
+    });
+
+    test("always sends edits and deletions of routes TimeZero has", async () => {
+      const { bridge, offers } = setup(true, 200);
+      await bridge.fromTimeZero([tzRoute()]);
+      await vi.runAllTimersAsync();
+      bridge.onResourceDelta("routes", ID, { ...route, name: "Edited" });
+      await vi.runAllTimersAsync();
+      bridge.onResourceDelta("routes", ID, null);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([ID, ID]);
+    });
+
+    test("a held-back route goes once a pull frees room", async () => {
+      const { peer, bridge, store, offers, count } = setup(true, 200);
+      bridge.onResourceDelta("routes", newRoute(1), route);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([]);
+      count.live = 199;
+      store.routes![newRoute(1)] = route;
+      peer.emit("pulled", ["something-else"]);
+      await vi.runAllTimersAsync();
+      expect(offers).toEqual([newRoute(1)]);
+    });
+
+    test("a held-back route is sent on a later start", async () => {
+      const { bridge, store, offers, count } = setup(true, 200);
+      store.routes![newRoute(1)] = route;
+      await bridge.reconcile();
+      expect(offers).toEqual([]);
+      count.live = 150;
+      await bridge.reconcile();
+      expect(offers).toEqual([newRoute(1)]);
+    });
   });
 
   test("on start, leaves them alone when offering existing ones is off", async () => {
