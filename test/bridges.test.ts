@@ -335,6 +335,24 @@ describe("course bridge", () => {
     );
   });
 
+  test("a cancel before TimeZero pulls the route drops the waiting activation", async () => {
+    const peer = makePeer();
+    peer.offer([fromSkRoute(ID, route, undefined, NOW)!]);
+    const set = vi.spyOn(peer, "setNavigation");
+    let current: unknown = routeCourse();
+    const app = {
+      getCourse: async () => current,
+      debug: () => {},
+      error: () => {},
+    } as unknown as ServerAPI;
+    const bridge = new CourseBridge(app, peer);
+    await bridge.fromSignalK();
+    current = { ...routeCourse(), activeRoute: null };
+    await bridge.fromSignalK();
+    peer.emit("pulled", [ID]);
+    expect(set).not.toHaveBeenCalled();
+  });
+
   test("applies TimeZero navigation through the Course API", async () => {
     const peer = makePeer();
     const app = {

@@ -87,13 +87,14 @@ export class CourseBridge {
       this.app.debug(`reading course: ${(err as Error).message}`);
       return;
     }
+    // The latest course replaces an activation still waiting for its route.
+    this.waitingFor = null;
     if (!nav || sameNavigation(nav, this.peer.navigation)) return;
     if (nav.kind === "route" && this.peer.isPending(nav.routeGuid)) {
       // TimeZero can only follow a route it has; activate once it pulled it.
       this.waitingFor = { guid: nav.routeGuid, nav };
       return;
     }
-    this.waitingFor = null;
     this.peer.setNavigation(nav);
   }
 }
