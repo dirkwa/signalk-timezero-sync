@@ -223,7 +223,10 @@ async function round(address) {
       log(`round: pulled ${o.Guid} deleted=${parseRow(o.Values)[10]}`);
       trimRoutes();
     }
-    const ours = [...s.objects.values()].filter((o) => o.Tick > record);
+    // A peer without layer support gets no objects that live in a layer.
+    const ours = [...s.objects.values()].filter(
+      (o) => o.Tick > record && !inLayer(o),
+    );
     await request(
       address,
       "POST",
@@ -263,6 +266,10 @@ async function round(address) {
       `/LanSynchronizationApi/ReleaseLock?NetworkID=${id}`,
     ).catch(() => {});
   }
+}
+
+function inLayer(o) {
+  return parseRow(o.Values)[12] !== null;
 }
 
 function liveRoutes() {
@@ -315,8 +322,9 @@ http
       if (p.endsWith("/UserObject") && req.method === "GET") {
         const min = Number(url.searchParams.get("MinTick") || 0);
         const limit = Number(url.searchParams.get("Limit") || 5000);
+        const layers = url.searchParams.get("CanUseLayers") === "True";
         const newer = [...s.objects.values()]
-          .filter((o) => o.Tick > min)
+          .filter((o) => o.Tick > min && (layers || !inLayer(o)))
           .sort((a, b) => a.Tick - b.Tick);
         log(
           `read by peer: UserObject MinTick=${min} -> ${Math.min(newer.length, limit)}`,
@@ -426,21 +434,34 @@ http
   })
   .listen(8080, "0.0.0.0");
 
-// Initial TimeZero content: one route and one mark.
-const routeA = routeObject(
-  "aaaaaaaa-0000-4000-8000-000000000001",
-  "TZ Route A",
-  [
-    [-17.8, 177.15],
-    [-17.79, 177.16],
-    [-17.78, 177.17],
-  ],
-);
-s.objects.set(routeA.Guid, routeA);
-const markA = markObject(
-  "aaaaaaaa-0000-4000-8000-000000000002",
-  "TZ Mark 1",
-  [-17.81, 177.14],
-);
-s.objects.set(markA.Guid, markA);
+// Start from a captured TimeZero table (SEED: a UserObject read with
+// CanUseLayers=True), or from one route and one mark.
+if (process.env.SEED) {
+  const { readFileSync } = await import("node:fs");
+  const seed = JSON.parse(readFileSync(process.env.SEED, "utf8"));
+  for (const o of seed.Objects) s.objects.set(o.Guid, o);
+  s.currentTick = seed.CurrentTick;
+  console.log(`seeded ${seed.Objects.length} objects at tick ${s.currentTick}`);
+} else {
+  seedDemo();
+}
+
+function seedDemo() {
+  const routeA = routeObject(
+    "aaaaaaaa-0000-4000-8000-000000000001",
+    "TZ Route A",
+    [
+      [-17.8, 177.15],
+      [-17.79, 177.16],
+      [-17.78, 177.17],
+    ],
+  );
+  s.objects.set(routeA.Guid, routeA);
+  const markA = markObject(
+    "aaaaaaaa-0000-4000-8000-000000000002",
+    "TZ Mark 1",
+    [-17.81, 177.14],
+  );
+  s.objects.set(markA.Guid, markA);
+}
 console.log(`fake TimeZero up as ${HOST_ID}`);

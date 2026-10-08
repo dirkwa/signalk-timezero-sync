@@ -251,6 +251,43 @@ describe("resources bridge", () => {
     ]);
   });
 
+  test("never takes a known object missing from Signal K for a deletion", async () => {
+    const { bridge, store, offers } = setup();
+    await bridge.fromTimeZero([tzRoute()]);
+    await vi.runAllTimersAsync();
+    delete store.routes![ID]; // e.g. not written yet, or another provider
+    await bridge.reconcile();
+    expect(offers).toEqual([]);
+  });
+
+  test("a check started during an import waits for it and offers nothing back", async () => {
+    const { bridge, store, offers } = setup();
+    // Writes are slow, as with hundreds of objects arriving on first contact.
+    const api = (bridge as unknown as { app: ServerAPI }).app.resourcesApi;
+    const write = api.setResource.bind(api);
+    api.setResource = async (...args: Parameters<typeof write>) => {
+      await new Promise((r) => setTimeout(r, 50));
+      return write(...args);
+    };
+    const objects = Array.from({ length: 20 }, (_, i) =>
+      asObject(
+        fromSkRoute(
+          `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+          route,
+          undefined,
+          NOW,
+        )!,
+        33000 + i,
+      ),
+    );
+    const importing = bridge.fromTimeZero(objects);
+    const checking = bridge.reconcile();
+    await vi.runAllTimersAsync();
+    await Promise.all([importing, checking]);
+    expect(Object.keys(store.routes!)).toHaveLength(20);
+    expect(offers).toEqual([]);
+  });
+
   test("on start, offers Signal K routes TimeZero never had", async () => {
     const { bridge, store, offers } = setup();
     store.routes![ID] = route;
@@ -405,7 +442,7 @@ describe("resources bridge", () => {
 
 describe("course bridge", () => {
   const routeCourse = (reverse = false) => ({
-    startTime: null,
+    startTime: new Date().toISOString(),
     targetArrivalTime: null,
     arrivalCircle: 0,
     activeRoute: {
@@ -460,16 +497,114 @@ describe("course bridge", () => {
     ).toBe(false);
   });
 
+  // A Signal K app whose course is whatever `state.course` holds.
+  const courseApp = (initial: unknown) => {
+    const state = { course: initial };
+    const app = {
+      getCourse: async () => state.course,
+      clearDestination: vi.fn(async () => {
+        state.course = noCourse;
+      }),
+      setDestination: vi.fn(async () => {}),
+      activateRoute: vi.fn(async () => {}),
+      debug: () => {},
+      error: vi.fn(),
+    } as unknown as ServerAPI;
+    return { app, state };
+  };
+  const noCourse = { ...routeCourse(), activeRoute: null };
+  const staleGoto = {
+    ...noCourse,
+    startTime: "2026-10-08T01:40:04.715Z",
+    nextPoint: {
+      type: "Location",
+      position: { latitude: -17.822, longitude: 177.171 },
+    },
+  };
+
+  test("a course already set when the plugin starts is not sent to TimeZero", async () => {
+    // A go-to left in Signal K from a passage the day before.
+    const peer = makePeer();
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app } = courseApp(staleGoto);
+    const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
+    await bridge.fromSignalK(); // the Course API re-emitting its state
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  test("a saved course the Course API restores after start-up is not sent", async () => {
+    // The Course API can restore its saved course after the plugin started,
+    // which looks like a change from "no course".
+    const peer = makePeer();
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, state } = courseApp(noCourse);
+    const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
+    state.course = staleGoto;
+    await bridge.fromSignalK();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  test("clearing an old Signal K course does not cancel TimeZero's", async () => {
+    const peer = makePeer();
+    peer.setNavigation({
+      kind: "route",
+      origin: null,
+      routeGuid: ID,
+      pointIndex: 0,
+    });
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, state } = courseApp(staleGoto);
+    const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
+    state.course = noCourse;
+    await bridge.fromSignalK();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  test("moving to the next point of a route both follow is sent", async () => {
+    const peer = makePeer();
+    const old = { ...routeCourse(), startTime: "2026-10-08T01:40:04.715Z" };
+    peer.setNavigation({
+      kind: "route",
+      origin: null,
+      routeGuid: ID,
+      pointIndex: 1,
+    });
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, state } = courseApp(old);
+    const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
+    state.course = {
+      ...old,
+      activeRoute: { ...old.activeRoute, pointIndex: 2 },
+    };
+    await bridge.fromSignalK();
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({ pointIndex: 2 }),
+    );
+  });
+
+  test("a course set while running is sent", async () => {
+    const peer = makePeer();
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, state } = courseApp(noCourse);
+    const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
+    state.course = { ...staleGoto, startTime: new Date().toISOString() };
+    await bridge.fromSignalK();
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({ kind: "goto" }));
+  });
+
   test("waits for TimeZero to pull a route before activating it there", async () => {
     const peer = makePeer();
     peer.offer([fromSkRoute(ID, route, undefined, NOW)!]);
     const set = vi.spyOn(peer, "setNavigation");
-    const app = {
-      getCourse: async () => routeCourse(),
-      debug: () => {},
-      error: () => {},
-    } as unknown as ServerAPI;
+    const { app, state } = courseApp(noCourse);
     const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
+    state.course = routeCourse();
     await bridge.fromSignalK();
     expect(set).not.toHaveBeenCalled();
     peer.emit("pulled", [ID]);
@@ -482,29 +617,23 @@ describe("course bridge", () => {
     const peer = makePeer();
     peer.offer([fromSkRoute(ID, route, undefined, NOW)!]);
     const set = vi.spyOn(peer, "setNavigation");
-    let current: unknown = routeCourse();
-    const app = {
-      getCourse: async () => current,
-      debug: () => {},
-      error: () => {},
-    } as unknown as ServerAPI;
+    const { app, state } = courseApp(noCourse);
     const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
+    state.course = routeCourse();
     await bridge.fromSignalK();
-    current = { ...routeCourse(), activeRoute: null };
+    state.course = noCourse;
     await bridge.fromSignalK();
     peer.emit("pulled", [ID]);
     expect(set).not.toHaveBeenCalled();
   });
 
-  test("applies TimeZero navigation through the Course API", async () => {
+  test("applies TimeZero navigation through the Course API, and not back again", async () => {
     const peer = makePeer();
-    const app = {
-      clearDestination: vi.fn(async () => {}),
-      setDestination: vi.fn(async () => {}),
-      activateRoute: vi.fn(async () => {}),
-      error: vi.fn(),
-    } as unknown as ServerAPI;
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, state } = courseApp(noCourse);
     const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
     await bridge.fromTimeZero({
       kind: "route",
       origin: null,
@@ -515,55 +644,82 @@ describe("course bridge", () => {
       href: `/resources/routes/${ID}`,
       pointIndex: 2,
     });
+    // The Course API now shows it; that echo must not go back to TimeZero.
+    state.course = {
+      ...routeCourse(),
+      activeRoute: { ...routeCourse().activeRoute, pointIndex: 2 },
+    };
+    await bridge.fromSignalK();
+    expect(set).not.toHaveBeenCalled();
     await bridge.fromTimeZero({ kind: "none" });
     expect(app.clearDestination).toHaveBeenCalled();
+  });
+
+  test("does not re-apply a TimeZero course Signal K already shows", async () => {
+    const peer = makePeer();
+    const { app } = courseApp(routeCourse());
+    const bridge = new CourseBridge(app, peer);
+    await bridge.fromTimeZero({
+      kind: "route",
+      origin: null,
+      routeGuid: ID,
+      pointIndex: 1,
+    });
+    expect(app.activateRoute).not.toHaveBeenCalled();
   });
 });
 
 describe("anchor bridge", () => {
-  test("drops and raises through the anchor plugin's PUT handler", async () => {
-    const peer = makePeer();
+  const ANCHOR = { latitude: -17.8, longitude: 177.15 };
+  const anchorApp = (values: Record<string, unknown>) => {
     const puts: unknown[] = [];
     const app = {
+      getSelfPath: (p: string) => values[p],
       putSelfPath: vi.fn(async (_p: string, value: unknown) => {
         puts.push(value);
         return { state: "COMPLETED", statusCode: 200 };
       }),
       error: vi.fn(),
     } as unknown as ServerAPI;
-    const bridge = new AnchorBridge(app, peer);
-    bridge.fromTimeZero({
-      position: { latitude: -17.8, longitude: 177.15 },
-      radius: 60,
-    });
+    return { app, puts };
+  };
+  const down = (radius: number | null = 60) => ({
+    "navigation.anchor.position.value": ANCHOR,
+    "navigation.anchor.maxRadius.value": radius,
+  });
+
+  test("drops and raises through the anchor plugin's PUT handler", async () => {
+    const peer = makePeer();
+    const values: Record<string, unknown> = {};
+    const { app, puts } = anchorApp(values);
+    const bridge = new AnchorBridge(app, peer, 0);
+    bridge.fromTimeZero({ position: ANCHOR, radius: 60 });
+    await vi.runAllTimersAsync();
+    Object.assign(values, down()); // the anchor plugin dropped it
     bridge.fromTimeZero(null);
     await vi.runAllTimersAsync();
-    expect(puts).toEqual([
-      { latitude: -17.8, longitude: 177.15, radius: 60 },
-      null,
-    ]);
+    expect(puts).toEqual([{ ...ANCHOR, radius: 60 }, null]);
+  });
+
+  test("an anchor already down when the plugin starts is not sent", () => {
+    const peer = makePeer();
+    const set = vi.spyOn(peer, "setAnchor");
+    const { app } = anchorApp(down());
+    const bridge = new AnchorBridge(app, peer, 0);
+    bridge.fromSignalK();
+    expect(set).not.toHaveBeenCalled();
   });
 
   test("sends a Signal K anchor change, but not a zone TimeZero cannot show", () => {
     const peer = makePeer();
     const set = vi.spyOn(peer, "setAnchor");
-    const values: Record<string, unknown> = {
-      "navigation.anchor.position.value": {
-        latitude: -17.8,
-        longitude: 177.15,
-      },
-      "navigation.anchor.maxRadius.value": 60,
-    };
-    const app = {
-      getSelfPath: (p: string) => values[p],
-    } as unknown as ServerAPI;
-    const bridge = new AnchorBridge(app, peer);
+    const values: Record<string, unknown> = {};
+    const { app } = anchorApp(values);
+    const bridge = new AnchorBridge(app, peer, 0);
+    Object.assign(values, down());
     bridge.fromSignalK();
-    expect(set).toHaveBeenLastCalledWith({
-      position: { latitude: -17.8, longitude: 177.15 },
-      radius: 60,
-    });
-    values["navigation.anchor.maxRadius.value"] = null; // a polygon zone
+    expect(set).toHaveBeenLastCalledWith({ position: ANCHOR, radius: 60 });
+    Object.assign(values, down(null)); // a polygon zone
     values["navigation.anchor.position.value"] = {
       latitude: -17.9,
       longitude: 177.15,
@@ -572,8 +728,28 @@ describe("anchor bridge", () => {
     expect(set).toHaveBeenCalledTimes(1);
   });
 
+  test("an anchor restored just after start-up is not sent", () => {
+    const peer = makePeer();
+    const set = vi.spyOn(peer, "setAnchor");
+    const values: Record<string, unknown> = {};
+    const { app } = anchorApp(values);
+    const bridge = new AnchorBridge(app, peer, 60000);
+    Object.assign(values, down()); // the anchor plugin restores its anchor
+    bridge.fromSignalK();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  test("a TimeZero anchor Signal K already shows is not applied again", async () => {
+    const peer = makePeer();
+    const { app, puts } = anchorApp(down());
+    const bridge = new AnchorBridge(app, peer, 0);
+    bridge.fromTimeZero({ position: ANCHOR, radius: 60 });
+    await vi.runAllTimersAsync();
+    expect(puts).toEqual([]);
+  });
+
   test("compares anchors to TimeZero's precision", () => {
-    const a = { position: { latitude: -17.8, longitude: 177.15 }, radius: 60 };
+    const a = { position: ANCHOR, radius: 60 };
     expect(sameAnchor(a, { ...a, radius: 60.001 })).toBe(true);
     expect(sameAnchor(a, null)).toBe(false);
     expect(sameAnchor(null, null)).toBe(true);

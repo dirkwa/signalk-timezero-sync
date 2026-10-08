@@ -66,9 +66,10 @@ export class ResourcesBridge {
   private held: Set<string>;
   private pending = new Map<string, { type: SyncedType; value: unknown }>();
   private flushTimer: NodeJS.Timeout | null = null;
-  // Room is checked and reserved one commit at a time, or two commits could
-  // both take TimeZero's last place.
-  private commits: Promise<void> = Promise.resolve();
+  // Imports, offers and the start-up check run one at a time. A check that
+  // overlapped an import would see a half-written Signal K, and two offers
+  // checking room together could both take TimeZero's last route place.
+  private ops: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly app: ServerAPI,
@@ -82,10 +83,21 @@ export class ResourcesBridge {
     );
     this.held = new Set(saved.held);
     peer.on("objects", (objects) => void this.fromTimeZero(objects));
+    // Only once all of TimeZero's objects are here can a Signal K resource be
+    // told apart from one TimeZero already has.
+    peer.on("caughtUp", () => void this.reconcile());
     peer.on("pulled", (guids) => {
       guids.forEach((g) => this.awaitingNew.delete(g));
       this.retryHeld();
     });
+  }
+
+  private enqueue(op: () => Promise<void>): Promise<void> {
+    const run = this.ops.then(op);
+    this.ops = run.catch((err: Error) =>
+      this.app.error(`TimeZero resource sync: ${err.message}`),
+    );
+    return run;
   }
 
   // Routes held back for TimeZero's limit go once there may be room: after a
@@ -101,7 +113,11 @@ export class ResourcesBridge {
 
   // ---- TimeZero -> Signal K ----------------------------------------------
 
-  async fromTimeZero(objects: UserObject[]): Promise<void> {
+  fromTimeZero(objects: UserObject[]): Promise<void> {
+    return this.enqueue(() => this.importObjects(objects));
+  }
+
+  private async importObjects(objects: UserObject[]): Promise<void> {
     for (const obj of objects) {
       const type = typeOf(obj);
       if (!type || !this.opts.types.includes(type) || inUserLayer(obj))
@@ -132,6 +148,8 @@ export class ResourcesBridge {
             resource as unknown as Record<string, unknown>,
           );
       } catch (err) {
+        // Not in Signal K, so not ours to compare against later.
+        if (!known) delete this.known[obj.guid];
         this.app.error(
           `TimeZero ${type} ${obj.guid}: ${(err as Error).message}`,
         );
@@ -155,15 +173,23 @@ export class ResourcesBridge {
 
   private flush(): void {
     this.flushTimer = null;
-    const now = new Date();
-    const candidates: Candidate[] = [];
-    for (const [id, { type, value }] of this.pending) {
-      if (value === null) this.held.delete(id);
-      const c = this.candidate(type, id, value as Route | Waypoint | null, now);
-      if (c) candidates.push(c);
-    }
+    const changes = [...this.pending];
     this.pending.clear();
-    void this.commit(candidates);
+    void this.enqueue(async () => {
+      const now = new Date();
+      const candidates: Candidate[] = [];
+      for (const [id, { type, value }] of changes) {
+        if (value === null) this.held.delete(id);
+        const c = this.candidate(
+          type,
+          id,
+          value as Route | Waypoint | null,
+          now,
+        );
+        if (c) candidates.push(c);
+      }
+      await this.commitNow(candidates);
+    });
   }
 
   // What to offer for a Signal K change, without recording anything yet: a
@@ -207,12 +233,6 @@ export class ResourcesBridge {
   // On a Furuno NavNet, TimeZero holds at most 200 routes and makes room for
   // a new one by deleting the route modified longest ago, on every device it
   // syncs with. So a new Signal K route is only sent while there is room.
-  private commit(candidates: Candidate[]): Promise<void> {
-    const run = this.commits.then(() => this.commitNow(candidates));
-    this.commits = run.catch(() => {});
-    return run;
-  }
-
   private async commitNow(candidates: Candidate[]): Promise<void> {
     const newRoutes = candidates.filter((c) => c.newRoute);
     let accepted = candidates.filter((c) => !c.newRoute);
@@ -246,8 +266,16 @@ export class ResourcesBridge {
     return Math.max(0, this.opts.maxRoutes - live - this.awaitingNew.size);
   }
 
-  // Resources changed while the plugin was off, or never synced at all.
-  async reconcile(): Promise<void> {
+  // Signal K resources TimeZero does not have yet, and edits made while the
+  // plugin was off. A resource missing from Signal K is never taken as
+  // deleted: it may simply not be written yet, and a wrong guess would delete
+  // a route on every TimeZero device. Deletions go to TimeZero only when
+  // Signal K reports them.
+  reconcile(): Promise<void> {
+    return this.enqueue(() => this.reconcileNow());
+  }
+
+  private async reconcileNow(): Promise<void> {
     const now = new Date();
     const candidates: Candidate[] = [];
     for (const type of this.opts.types) {
@@ -264,16 +292,11 @@ export class ResourcesBridge {
         const c = this.candidate(type, id, resource as Route | Waypoint, now);
         if (c) candidates.push(c);
       }
-      for (const [id, known] of Object.entries(this.known)) {
-        if (known.type !== type || id in resources) continue;
-        const c = this.candidate(type, id, null, now);
-        if (c) candidates.push(c);
-      }
       if (type === "routes")
         for (const id of this.held)
           if (!(id in resources)) this.held.delete(id);
     }
-    await this.commit(candidates);
+    await this.commitNow(candidates);
   }
 
   private save(): void {

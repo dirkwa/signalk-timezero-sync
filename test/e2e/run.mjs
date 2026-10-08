@@ -99,7 +99,9 @@ function cleanup() {
   quiet("network", "rm", "-f", NET);
 }
 
-function serverHome() {
+// preload: resources and a course the server already has before the plugin
+// first runs, like a boat that has been sailing with Signal K for a while.
+function serverHome({ maxRoutes = 2, anchorZone = null, preload = null } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tz-sync-e2e-"));
   const cfg = path.join(home, "plugin-config-data");
   fs.mkdirSync(cfg, { recursive: true });
@@ -123,7 +125,7 @@ function serverHome() {
     hostName: "SignalK-E2E",
     userId: USER_ID,
     rejoinPauseSeconds: 12,
-    maxRoutes: 2,
+    maxRoutes,
   });
   plugin("resources-provider", {
     standard: { routes: true, waypoints: true, notes: true, regions: true },
@@ -137,7 +139,24 @@ function serverHome() {
       noPositionAlarmTime: 0,
       allowZoneOutsideVessel: true,
       enableEngineCheck: false,
+      ...(anchorZone ? { zone: JSON.stringify(anchorZone) } : {}),
     });
+  if (preload) {
+    for (const type of ["routes", "waypoints"]) {
+      const dir = path.join(cfg, "resources-provider", "resources", type);
+      fs.mkdirSync(dir, { recursive: true });
+      for (const [id, value] of Object.entries(preload[type] ?? {}))
+        fs.writeFileSync(path.join(dir, id), JSON.stringify(value));
+    }
+    if (preload.course) {
+      const dir = path.join(home, "serverState", "course");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "settings.json"),
+        JSON.stringify(preload.course),
+      );
+    }
+  }
   return home;
 }
 
@@ -223,9 +242,7 @@ function feedPosition() {
 const ROUTE_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const MARK_A = "aaaaaaaa-0000-4000-8000-000000000002";
 
-async function main() {
-  cleanup();
-  podman("network", "create", "--subnet", "10.89.201.0/24", NET);
+function startFakeTimeZero(env, mounts = []) {
   podman(
     "run",
     "-d",
@@ -241,20 +258,29 @@ async function main() {
     `${PLUGIN}:/plugin:ro`,
     "-v",
     `${E2E}:/e2e:ro`,
+    ...mounts,
     "--env",
     `USER_ID=${USER_ID}`,
     "--env",
     "BROADCAST=10.89.201.255",
-    "--env",
-    "MAX_ROUTES=2",
+    ...env.flatMap((e) => ["--env", e]),
     "--entrypoint",
     "node",
     IMAGE,
     "/e2e/fake-timezero.mjs",
   );
+}
+
+async function defaultScenario() {
+  cleanup();
+  podman("network", "create", "--subnet", "10.89.201.0/24", NET);
+  startFakeTimeZero(["MAX_ROUTES=2"]);
   const home = serverHome();
   startServer(home);
   await serverReady();
+  // The anchor bridge ignores anchor changes for its first minute, while an
+  // anchor plugin may still be restoring its anchor.
+  const anchorSettled = Date.now() + 65000;
   let stopFeed = feedPosition();
 
   console.log("== TimeZero -> Signal K: routes and marks on first contact");
@@ -402,6 +428,7 @@ async function main() {
 
   if (ANCHOR_PLUGIN) {
     console.log("== anchor, both ways");
+    await sleep(Math.max(0, anchorSettled - Date.now()));
     await send("POST", `${API}/plugins/hoekens-anchor-alarm/dropAnchor`, {
       position: SELF,
       zone: { type: "circle", radius: 50 },
@@ -470,7 +497,179 @@ async function main() {
   console.log("\n-- fake TimeZero log --\n" + after.log.join("\n"));
 }
 
-main()
+// First contact with a TimeZero that already holds a real table, from a
+// Signal K that already has routes, a waypoint, an old go-to and an anchor
+// down. Nothing of TimeZero's may change, and nothing Signal K had before the
+// plugin started may be pushed as if it were a change.
+async function firstContact(seed) {
+  const table = JSON.parse(fs.readFileSync(seed, "utf8"));
+  const row = (o) => {
+    const out = [];
+    let cur = "";
+    let q = false;
+    for (const ch of o.Values) {
+      if (ch === "'") q = !q;
+      if (ch === "," && !q) {
+        out.push(cur);
+        cur = "";
+      } else cur += ch;
+    }
+    out.push(cur);
+    return out;
+  };
+  const liveNoLayer = (type) =>
+    table.Objects.filter((o) => {
+      const r = row(o);
+      return r[0] === type && r[10] === "0" && r[12] === "NULL";
+    }).length;
+  const liveRoutes = table.Objects.filter(
+    (o) => row(o)[0] === "5" && row(o)[10] === "0",
+  ).length;
+  const skRoute = (lon) => ({
+    name: `SK own route ${lon}`,
+    feature: {
+      type: "Feature",
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          [lon, -17.8],
+          [lon + 0.01, -17.8],
+        ],
+      },
+      properties: {},
+    },
+  });
+  const SK_ROUTES = {
+    "bbbbbbbb-0000-4000-8000-000000000001": skRoute(177.3),
+    "bbbbbbbb-0000-4000-8000-000000000002": skRoute(177.4),
+  };
+  const SK_WAYPOINT = "bbbbbbbb-0000-4000-8000-000000000003";
+  const STALE_GOTO = {
+    startTime: "2026-10-08T01:40:04.715Z",
+    targetArrivalTime: null,
+    arrivalCircle: 20,
+    activeRoute: null,
+    nextPoint: {
+      position: { latitude: -17.822, longitude: 177.171 },
+      type: "Location",
+      name: "DP",
+    },
+    previousPoint: {
+      position: { latitude: -17.79, longitude: 177.244 },
+      type: "VesselPosition",
+      name: "VP",
+    },
+  };
+
+  cleanup();
+  podman("network", "create", "--subnet", "10.89.201.0/24", NET);
+  // Full, as the boat's TimeZero was.
+  startFakeTimeZero(
+    [`SEED=/seed/table.json`, `MAX_ROUTES=${liveRoutes}`],
+    ["-v", `${seed}:/seed/table.json:ro`],
+  );
+  const home = serverHome({
+    maxRoutes: liveRoutes,
+    anchorZone: ANCHOR_PLUGIN
+      ? { type: "circle", radius: 46, position: SELF }
+      : null,
+    preload: {
+      routes: SK_ROUTES,
+      waypoints: {
+        [SK_WAYPOINT]: {
+          name: "SK own waypoint",
+          feature: {
+            type: "Feature",
+            geometry: { type: "Point", coordinates: [177.3, -17.7] },
+          },
+        },
+      },
+      course: STALE_GOTO,
+    },
+  });
+  startServer(home);
+  await serverReady();
+  const stopFeed = feedPosition();
+  const tzBefore = await tz();
+
+  console.log(`== first contact: ${table.Objects.length} TimeZero objects`);
+  await waitFor(
+    `all of TimeZero's ${liveNoLayer("5")} routes are in Signal K`,
+    async () => Object.keys(await routes()).length >= liveNoLayer("5") + 2,
+    180000,
+  );
+  await waitFor(
+    `all of TimeZero's ${liveNoLayer("0")} marks are waypoints in Signal K`,
+    async () =>
+      Object.keys(await get(`${API}/signalk/v2/api/resources/waypoints`))
+        .length >=
+      liveNoLayer("0") + 1,
+    180000,
+  );
+  await waitFor(
+    "TimeZero pulls Signal K's own waypoint",
+    async () => (await tz()).objects.some((o) => o.guid === SK_WAYPOINT),
+    90000,
+  );
+  // Let any further offers and rejoins play out.
+  await sleep(45000);
+  const after = await tz();
+  const seedByGuid = new Map(table.Objects.map((o) => [o.Guid, o]));
+  const changed = after.objects.filter((o) => {
+    const orig = seedByGuid.get(o.guid);
+    return (
+      orig && (o.tick !== orig.Tick || String(o.deleted) !== row(orig)[10])
+    );
+  });
+  check(
+    "none of TimeZero's objects changed",
+    changed.length === 0,
+    JSON.stringify(changed.slice(0, 5)),
+  );
+  check(
+    "TimeZero pulled nothing but Signal K's own objects",
+    after.log
+      .filter((l) => l.includes("round: pulled"))
+      .every((l) => l.includes(SK_WAYPOINT)),
+    after.log.filter((l) => l.includes("round: pulled")).join("; "),
+  );
+  check(
+    "Signal K's own routes are held back while TimeZero is full",
+    !after.objects.some((o) => o.guid in SK_ROUTES),
+  );
+  check(
+    "the old Signal K go-to is not pushed to TimeZero",
+    after.activeRoute.TemporaryDestinationPosition === "NULL" &&
+      after.activeRoute.RouteGuid === "NULL",
+    JSON.stringify(after.activeRoute),
+  );
+  check(
+    "TimeZero's anchor watch is unchanged",
+    after.anchor.ChangeTick === tzBefore.anchor.ChangeTick,
+    JSON.stringify(after.anchor),
+  );
+  check(
+    "Signal K keeps its go-to",
+    Math.abs(((await course()).nextPoint?.position?.latitude ?? 0) + 17.822) <
+      1e-6,
+  );
+  if (ANCHOR_PLUGIN)
+    check(
+      "Signal K's anchor stays down",
+      (await anchorPosition())?.latitude !== undefined,
+    );
+  check(
+    "TimeZero never had to delete a route, and no table was pushed to it",
+    after.failures.length === 0,
+    after.failures.join("; "),
+  );
+  stopFeed();
+  console.log(
+    "\n-- fake TimeZero log (tail) --\n" + after.log.slice(-25).join("\n"),
+  );
+}
+
+(args.seed ? firstContact(path.resolve(args.seed)) : defaultScenario())
   .catch((e) => {
     failures++;
     console.error(e);

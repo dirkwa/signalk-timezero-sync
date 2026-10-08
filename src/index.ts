@@ -148,12 +148,10 @@ export default function (app: ServerAPI): Plugin {
         .start()
         .then(() => {
           app.setPluginStatus(`Syncing as ${running.hostId.split("/")[0]}`);
-          // Checked once TimeZero is there to count its routes, and again
-          // whenever it comes back. Offers still waiting from before a
-          // restart need a rejoin: a quick restart goes unnoticed by TimeZero.
+          // Offers still waiting from before a restart need a rejoin: a
+          // quick restart goes unnoticed by TimeZero.
           running.on("joined", () => {
             if (running.hasUnpulledOffers) running.rejoin();
-            void resources?.reconcile();
           });
         })
         .catch((err: NodeJS.ErrnoException) => {

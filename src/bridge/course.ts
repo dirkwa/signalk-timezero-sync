@@ -29,16 +29,34 @@ const samePosition = (a: LatLon, b: LatLon): boolean =>
   Math.abs(a.latitude - b.latitude) < SAME_POSITION_DEGREES &&
   Math.abs(a.longitude - b.longitude) < SAME_POSITION_DEGREES;
 
+const sameOrBothNull = (a: Navigation | null, b: Navigation | null): boolean =>
+  a === null || b === null ? a === b : sameNavigation(a, b);
+
+// Slack for the clocks of the Course API and this plugin, which are the same
+// process, and for the time between a course being set and us reading it.
+const START_SLACK_MS = 5000;
+
 export class CourseBridge {
+  private readonly startedAt = Date.now();
   private settleTimer: NodeJS.Timeout | null = null;
   // A route activation waiting for TimeZero to pull the route first.
   private waitingFor: { guid: string; nav: Navigation } | null = null;
+  // The Signal K course as last seen. Only a change from it is sent: a course
+  // that was already set when the plugin started (perhaps left over from a
+  // passage days ago) stays in Signal K.
+  private baseline: Navigation | null | "unset" = "unset";
 
   constructor(
     private readonly app: ServerAPI,
     private readonly peer: TimeZeroPeer,
   ) {
     peer.on("navigation", (nav) => void this.fromTimeZero(nav));
+    app
+      .getCourse()
+      .then((course) => {
+        if (this.baseline === "unset") this.baseline = toNavigation(course);
+      })
+      .catch(() => {});
     peer.on("pulled", (guids) => {
       if (this.waitingFor && guids.includes(this.waitingFor.guid)) {
         const { nav } = this.waitingFor;
@@ -54,7 +72,12 @@ export class CourseBridge {
   }
 
   async fromTimeZero(nav: Navigation): Promise<void> {
+    // What we apply comes back as course deltas; it is not a Signal K change.
+    this.baseline = nav;
     try {
+      // TimeZero updates its record while navigating; re-applying an unchanged
+      // course would restart the Signal K leg each time.
+      if (sameOrBothNull(toNavigation(await this.app.getCourse()), nav)) return;
       if (nav.kind === "none") await this.app.clearDestination();
       else if (nav.kind === "goto")
         await this.app.setDestination({ position: nav.destination });
@@ -80,22 +103,55 @@ export class CourseBridge {
 
   async fromSignalK(): Promise<void> {
     this.settleTimer = null;
-    let nav: Navigation | null;
+    let course: Course;
     try {
-      nav = toNavigation(await this.app.getCourse());
+      course = await this.app.getCourse();
     } catch (err) {
       this.app.debug(`reading course: ${(err as Error).message}`);
       return;
     }
+    const nav = toNavigation(course);
+    const before = this.baseline;
+    if (before === "unset") {
+      this.baseline = nav;
+      return;
+    }
+    if (sameOrBothNull(nav, before)) return;
+    this.baseline = nav;
     // The latest course replaces an activation still waiting for its route.
     this.waitingFor = null;
     if (!nav || sameNavigation(nav, this.peer.navigation)) return;
+    if (!this.isNewAction(nav, before, course)) return;
     if (nav.kind === "route" && this.peer.isPending(nav.routeGuid)) {
       // TimeZero can only follow a route it has; activate once it pulled it.
       this.waitingFor = { guid: nav.routeGuid, nav };
       return;
     }
     this.peer.setNavigation(nav);
+  }
+
+  // Whether a Signal K course change is something someone just did, rather
+  // than the Course API restoring a course saved before a restart (which can
+  // arrive after the plugin has started and look like a change).
+  private isNewAction(
+    nav: Navigation,
+    before: Navigation | null,
+    course: Course,
+  ): boolean {
+    // Moving along a followed route keeps its start time.
+    if (
+      nav.kind === "route" &&
+      before?.kind === "route" &&
+      nav.routeGuid === before.routeGuid
+    )
+      return true;
+    // A cancel only goes when the two sides agreed before it; clearing an old
+    // Signal K course must not cancel what TimeZero is navigating.
+    if (nav.kind === "none")
+      return before !== null && sameNavigation(before, this.peer.navigation);
+    // A new go-to or route activation carries the time it was set.
+    const started = course.startTime ? Date.parse(course.startTime) : NaN;
+    return started >= this.startedAt - START_SLACK_MS;
   }
 }
 

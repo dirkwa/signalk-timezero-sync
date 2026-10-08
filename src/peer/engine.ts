@@ -75,6 +75,8 @@ export interface PeerEvents {
   pulled: [string[]];
   // A trusted TimeZero is on the network again (or for the first time).
   joined: [];
+  // We hold all of TimeZero's routes and marks; fired once per session.
+  caughtUp: [];
   status: [string];
 }
 
@@ -94,6 +96,7 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
   private lockTakenAt = 0;
   private busy = false;
   private started = false;
+  private caughtUpThisSession = false;
 
   constructor(private readonly opts: PeerOptions) {
     super();
@@ -300,6 +303,10 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     // sends them when a peer joins, so read them ourselves.
     else if (beacon.tableTick > this.state.tzTableTick)
       void this.pullObjects(address);
+    else if (!this.caughtUpThisSession && !this.busy) {
+      this.caughtUpThisSession = true;
+      this.emit("caughtUp");
+    }
   }
 
   // NavNet is the subnet TimeZero itself trusts for account-free sync. Off

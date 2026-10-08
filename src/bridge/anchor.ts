@@ -8,6 +8,10 @@ import type { TimeZeroPeer } from "../peer/engine.js";
 import type { Anchor } from "../protocol/navigation.js";
 
 const CHANGE_SETTLE_MS = 1000;
+// After start the anchor plugin may still be restoring its saved anchor,
+// which would look like a fresh drop. Changes in this window only update what
+// we consider Signal K's current anchor.
+export const STARTUP_SETTLE_MS = 60000;
 // TimeZero stores the centre to the centimetre and the radius to 1 cm.
 const SAME_POSITION_DEGREES = 1e-6;
 const SAME_RADIUS_METERS = 0.01;
@@ -36,12 +40,21 @@ const isPosition = (v: unknown): v is Position =>
 
 export class AnchorBridge {
   private settleTimer: NodeJS.Timeout | null = null;
+  // The Signal K anchor as last seen. Only a change from it is sent, not an
+  // anchor that was already down when the plugin started.
+  private baseline: Anchor | null | "unset" = "unset";
+
+  private readonly settledAt: number;
 
   constructor(
     private readonly app: ServerAPI,
     private readonly peer: TimeZeroPeer,
+    startupSettleMs = STARTUP_SETTLE_MS,
   ) {
+    this.settledAt = Date.now() + startupSettleMs;
     peer.on("anchor", (anchor) => this.fromTimeZero(anchor));
+    const current = this.readSignalK();
+    if (current !== "unrepresentable") this.baseline = current;
   }
 
   stop(): void {
@@ -50,6 +63,10 @@ export class AnchorBridge {
   }
 
   fromTimeZero(anchor: Anchor | null): void {
+    // The anchor plugin's resulting deltas are not a Signal K change.
+    this.baseline = anchor;
+    const current = this.readSignalK();
+    if (current !== "unrepresentable" && sameAnchor(current, anchor)) return;
     const value = anchor
       ? {
           latitude: anchor.position.latitude,
@@ -81,22 +98,28 @@ export class AnchorBridge {
 
   fromSignalK(): void {
     this.settleTimer = null;
-    const position = this.app.getSelfPath("navigation.anchor.position.value");
-    const radius = this.app.getSelfPath("navigation.anchor.maxRadius.value");
-    let anchor: Anchor | null = null;
-    if (isPosition(position)) {
-      // TimeZero's anchor watch is a circle; an anchor without one (a polygon
-      // or sector zone) cannot be shown there, so leave TimeZero alone.
-      if (typeof radius !== "number") return;
-      anchor = {
-        position: {
-          latitude: position.latitude,
-          longitude: position.longitude,
-        },
-        radius,
-      };
+    const anchor = this.readSignalK();
+    // TimeZero's anchor watch is a circle; an anchor without one (a polygon
+    // or sector zone) cannot be shown there, so leave TimeZero alone.
+    if (anchor === "unrepresentable") return;
+    if (this.baseline === "unset" || Date.now() < this.settledAt) {
+      this.baseline = anchor;
+      return;
     }
+    if (sameAnchor(anchor, this.baseline)) return;
+    this.baseline = anchor;
     if (sameAnchor(anchor, this.peer.anchor)) return;
     this.peer.setAnchor(anchor);
+  }
+
+  private readSignalK(): Anchor | null | "unrepresentable" {
+    const position = this.app.getSelfPath("navigation.anchor.position.value");
+    const radius = this.app.getSelfPath("navigation.anchor.maxRadius.value");
+    if (!isPosition(position)) return null;
+    if (typeof radius !== "number") return "unrepresentable";
+    return {
+      position: { latitude: position.latitude, longitude: position.longitude },
+      radius,
+    };
   }
 }
