@@ -54,6 +54,12 @@ nor lets its older state overwrite a newer one.
 
 ## Limitations
 
+- On a Furuno NavNet TimeZero keeps at most 200 routes, and makes room for a
+  new one by deleting the route modified longest ago, on every device it syncs
+  with. The plugin therefore only sends a new Signal K route while TimeZero has
+  room, and says so in its status when it holds one back. Edits and deletions
+  always go through.
+
 - TimeZero marks and routes in user layers are left alone.
 - Areas, circles, lines, events and tracks are not synced.
 - TimeZero has no reverse flag, so a route followed in reverse in Signal K is not
