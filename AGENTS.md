@@ -49,6 +49,21 @@ of it.
   routes are only offered while there is room.
 - Timestamps count seconds from 2000-01-01. GUIDs travel in .NET byte order.
 
+## What the Signal K side must not do
+
+Learned on a live first contact (see the `fix: make first contact and
+start-up safe` commit):
+
+- Never infer a deletion from a resource being absent. During first contact
+  hundreds of TimeZero objects are still being written; absence means nothing.
+- Never compare Signal K against itself while an import is running: imports,
+  offers and the start-up check share one queue.
+- Never send state that predates the plugin. The Course API restores its saved
+  course after plugins start; a new course counts only if its `startTime` is
+  after the plugin started. Anchor changes in the first minute are ignored.
+- Run `node test/e2e/run.mjs --seed <captured table>` before any live test: it
+  starts from a real TimeZero table and a Signal K with existing state.
+
 ## Rules
 
 - **Tests must never reach the network.** Beacons in tests use real NavNet

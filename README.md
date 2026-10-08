@@ -60,6 +60,12 @@ nor lets its older state overwrite a newer one.
   room, and says so in its status when it holds one back. Edits and deletions
   always go through.
 
+- Only changes made while the plugin runs are sent to TimeZero. A route or
+  waypoint deleted in Signal K while the plugin was off stays in TimeZero, and a
+  course or anchor that was already set when Signal K started is not sent: a
+  go-to left over from an earlier passage must not become TimeZero's course.
+  Anchor changes in the first minute after start are not sent either, while an
+  anchor plugin may still be restoring its anchor.
 - TimeZero marks and routes in user layers are left alone.
 - Areas, circles, lines, events and tracks are not synced.
 - TimeZero has no reverse flag, so a route followed in reverse in Signal K is not
