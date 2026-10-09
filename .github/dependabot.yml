@@ -15,6 +15,15 @@ updates:
       dev-dependencies:
         dependency-type: development
         update-types: [minor, patch]
+    ignore:
+      # Each major brings the types of a newer Node, and with them APIs the
+      # Node versions the plugin supports (engines) may lack. Bump by hand.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
+      # TypeScript 7 is the native compiler; typescript-eslint and vitest's
+      # typecheck have to support it first. Move to it by hand.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
