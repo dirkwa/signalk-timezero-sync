@@ -1,10 +1,9 @@
-#!/usr/bin/env node
 // End-to-end test: a real Signal K server with this plugin, Hoeken's Anchor
 // Alarm and the resources provider, against the fake TimeZero master, on a
 // private podman network. Needs podman and a Signal K server image.
 //
-//   node test/e2e/run.mjs [--image <signalk-server image>] [--server-src <checkout>]
-//                         [--anchor-plugin <dir>]
+//   node test/e2e/run.ts [--image <signalk-server image>] [--server-src <checkout>]
+//                        [--anchor-plugin <dir>] [--seed <captured table>]
 //
 // --server-src runs a built signalk-server checkout (e.g. master) inside the
 // image instead of the server it ships.
@@ -13,23 +12,53 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type {
+  ActiveRouteDto,
+  AnchorWatchDto,
+} from "../../src/protocol/navigation.ts";
+import type { UserObjectTableDto } from "../../src/protocol/userObject.ts";
 
-const args = Object.fromEntries(
+// GET /state of the fake TimeZero's control API.
+interface TzState {
+  currentTick: number;
+  records: Record<string, number>;
+  activeRoute: ActiveRouteDto;
+  anchor: AnchorWatchDto;
+  objects: {
+    guid: string;
+    tick: number;
+    type: number;
+    name: string | null;
+    deleted: number;
+  }[];
+  log: string[];
+  failures: string[];
+}
+
+interface Resource {
+  name?: string;
+  feature?: unknown;
+}
+type Resources = Record<string, Resource | undefined>;
+
+interface Course {
+  activeRoute?: { href: string; pointIndex: number } | null;
+  nextPoint?: { position?: { latitude: number; longitude: number } } | null;
+}
+
+const args: Record<string, string | undefined> = Object.fromEntries(
   process.argv
     .slice(2)
-    .reduce(
-      (acc, a, i, all) =>
-        a.startsWith("--") ? [...acc, [a.slice(2), all[i + 1]]] : acc,
-      [],
+    .flatMap((a, i, all) =>
+      a.startsWith("--") ? [[a.slice(2), all[i + 1]]] : [],
     ),
 );
 const IMAGE = args.image ?? "ghcr.io/signalk/signalk-server:latest";
-const PLUGIN = path.resolve(new URL("../..", import.meta.url).pathname);
+const PLUGIN = path.resolve(import.meta.dirname, "../..");
 const ANCHOR_PLUGIN = args["anchor-plugin"]
   ? path.resolve(args["anchor-plugin"])
   : null;
 const SERVER_SRC = args["server-src"] ? path.resolve(args["server-src"]) : null;
-const E2E = path.dirname(new URL(import.meta.url).pathname);
 const USER_ID = "d5ff170c-4a28-47e0-b54f-1f98bda46c1c";
 const NET = "tz-sync-e2e";
 const SK = "tz-sync-e2e-sk";
@@ -40,57 +69,72 @@ const SELF = { latitude: -17.8075, longitude: 177.1545 };
 // Home of the image's node user, where Signal K keeps its config and plugins.
 const SK_HOME = "/home/node";
 
-const podman = (...a) =>
+const podman = (...a: string[]) =>
   execFileSync("podman", a, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-const quiet = (...a) => {
+const quiet = (...a: string[]) => {
   try {
     podman(...a);
   } catch {
     /* already gone */
   }
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let failures = 0;
-const check = (name, ok, detail = "") => {
+const check = (name: string, ok: boolean, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : `  ${detail}`}`);
   if (!ok) failures++;
 };
-async function waitFor(name, fn, timeoutMs = 30000) {
+async function waitFor(
+  name: string,
+  fn: () => unknown,
+  timeoutMs = 30000,
+): Promise<void> {
   const end = Date.now() + timeoutMs;
-  let last;
+  let last: unknown;
   while (Date.now() < end) {
     try {
       last = await fn();
       if (last) return check(name, true);
     } catch (e) {
-      last = e.message;
+      last = (e as Error).message;
     }
     await sleep(1000);
   }
   check(name, false, `last: ${JSON.stringify(last)?.slice(0, 300)}`);
 }
 
-const get = async (url) => (await fetch(url)).json();
-const send = async (method, url, body) => {
+// The JSON of a GET, typed as the caller expects it.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const get = async <T = any>(url: string): Promise<T> =>
+  (await fetch(url)).json() as Promise<T>;
+const send = async (
+  method: string,
+  url: string,
+  body?: unknown,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<{ status: number; json: any }> => {
   const res = await fetch(url, {
     method,
     headers: { "Content-Type": "application/json" },
-    body: body && JSON.stringify(body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
   return { status: res.status, json: text ? JSON.parse(text) : null };
 };
-const tz = (p = "/state", body) =>
-  body ? send("POST", CTL + p, body).then((r) => r.json) : get(CTL + p);
+const tz = (p = "/state", body?: object): Promise<TzState> =>
+  body
+    ? send("POST", CTL + p, body).then((r) => r.json as TzState)
+    : get<TzState>(CTL + p);
 const course = () =>
-  get(`${API}/signalk/v2/api/vessels/self/navigation/course`);
-const routes = () => get(`${API}/signalk/v2/api/resources/routes`);
-const waypoints = () => get(`${API}/signalk/v2/api/resources/waypoints`);
-const regions = () => get(`${API}/signalk/v2/api/resources/regions`);
+  get<Course>(`${API}/signalk/v2/api/vessels/self/navigation/course`);
+const routes = () => get<Resources>(`${API}/signalk/v2/api/resources/routes`);
+const waypoints = () =>
+  get<Resources>(`${API}/signalk/v2/api/resources/waypoints`);
+const regions = () => get<Resources>(`${API}/signalk/v2/api/resources/regions`);
 // Whether Signal K has a MOB alarm in an emergency state.
 const mobAlarm = async () => {
   const res = await fetch(
@@ -98,11 +142,11 @@ const mobAlarm = async () => {
   );
   return res.ok && (await res.text()).includes('"state":"emergency"');
 };
-const anchorPosition = async () =>
+const anchorPosition = async (): Promise<{ latitude?: number } | null> =>
   (
-    await get(
+    await get<{ value?: { latitude?: number } | null }>(
       `${API}/signalk/v1/api/vessels/self/navigation/anchor/position`,
-    ).catch(() => ({}))
+    ).catch(() => ({ value: null }))
   ).value ?? null;
 
 function cleanup() {
@@ -112,7 +156,17 @@ function cleanup() {
 
 // preload: resources and a course the server already has before the plugin
 // first runs, like a boat that has been sailing with Signal K for a while.
-function serverHome({ maxRoutes = 2, anchorZone = null, preload = null } = {}) {
+interface Preload {
+  routes?: Record<string, unknown>;
+  waypoints?: Record<string, unknown>;
+  course?: unknown;
+}
+
+function serverHome({
+  maxRoutes = 2,
+  anchorZone = null as object | null,
+  preload = null as Preload | null,
+} = {}): string {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tz-sync-e2e-"));
   const cfg = path.join(home, "plugin-config-data");
   fs.mkdirSync(cfg, { recursive: true });
@@ -121,13 +175,13 @@ function serverHome({ maxRoutes = 2, anchorZone = null, preload = null } = {}) {
     path.join(home, "settings.json"),
     JSON.stringify({ pipedProviders: [], interfaces: {} }),
   );
-  const deps = { "signalk-timezero-sync": "*" };
+  const deps: Record<string, string> = { "signalk-timezero-sync": "*" };
   if (ANCHOR_PLUGIN) deps["hoekens-anchor-alarm"] = "*";
   fs.writeFileSync(
     path.join(home, "package.json"),
     JSON.stringify({ name: "e2e", dependencies: deps }),
   );
-  const plugin = (id, configuration) =>
+  const plugin = (id: string, configuration: object) =>
     fs.writeFileSync(
       path.join(cfg, `${id}.json`),
       JSON.stringify({ enabled: true, configuration }),
@@ -152,7 +206,7 @@ function serverHome({ maxRoutes = 2, anchorZone = null, preload = null } = {}) {
       ...(anchorZone ? { zone: JSON.stringify(anchorZone) } : {}),
     });
   if (preload) {
-    for (const type of ["routes", "waypoints"]) {
+    for (const type of ["routes", "waypoints"] as const) {
       const dir = path.join(cfg, "resources-provider", "resources", type);
       fs.mkdirSync(dir, { recursive: true });
       for (const [id, value] of Object.entries(preload[type] ?? {}))
@@ -170,7 +224,7 @@ function serverHome({ maxRoutes = 2, anchorZone = null, preload = null } = {}) {
   return home;
 }
 
-function startServer(home) {
+function startServer(home: string): void {
   const mounts = [
     "-v",
     `${home}:${SK_HOME}/.signalk`,
@@ -214,7 +268,7 @@ function startServer(home) {
   );
 }
 
-async function serverReady() {
+async function serverReady(): Promise<true> {
   for (let i = 0; i < 90; i++) {
     try {
       if ((await fetch(`${API}/signalk/v2/api/resources/routes`)).ok)
@@ -230,7 +284,7 @@ async function serverReady() {
 }
 
 // Keep a vessel position flowing: the Course API and the anchor need one.
-function feedPosition() {
+function feedPosition(): () => void {
   const ws = new WebSocket(
     `${API.replace("http", "ws")}/signalk/v1/stream?subscribe=none`,
   );
@@ -254,7 +308,7 @@ const MARK_A = "aaaaaaaa-0000-4000-8000-000000000002";
 const AREA_A = "aaaaaaaa-0000-4000-8000-000000000003";
 const MARK_LOCKED = "aaaaaaaa-0000-4000-8000-000000000004";
 
-function startFakeTimeZero(env, mounts = []) {
+function startFakeTimeZero(env: string[], mounts: string[] = []): void {
   podman(
     "run",
     "-d",
@@ -268,8 +322,6 @@ function startFakeTimeZero(env, mounts = []) {
     "127.0.0.1:3912:8080",
     "-v",
     `${PLUGIN}:/plugin:ro`,
-    "-v",
-    `${E2E}:/e2e:ro`,
     ...mounts,
     "--env",
     `USER_ID=${USER_ID}`,
@@ -279,11 +331,11 @@ function startFakeTimeZero(env, mounts = []) {
     "--entrypoint",
     "node",
     IMAGE,
-    "/e2e/fake-timezero.mjs",
+    "/plugin/test/e2e/fake-timezero.ts",
   );
 }
 
-async function defaultScenario() {
+async function defaultScenario(): Promise<void> {
   cleanup();
   podman("network", "create", "--subnet", "10.89.201.0/24", NET);
   startFakeTimeZero(["MAX_ROUTES=2"]);
@@ -297,7 +349,11 @@ async function defaultScenario() {
 
   // A fresh server has the Course API's API Only Mode off.
   await waitFor("the plugin status warns that API Only Mode is off", async () =>
-    (await get(`${API}/skServer/plugins`))
+    (
+      await get<{ id: string; statusMessage?: string }[]>(
+        `${API}/skServer/plugins`,
+      )
+    )
       .find((p) => p.id === "signalk-timezero-sync")
       ?.statusMessage?.includes("API Only Mode"),
   );
@@ -309,9 +365,7 @@ async function defaultScenario() {
   );
   await waitFor(
     "TimeZero's mark appears as a waypoint",
-    async () =>
-      (await get(`${API}/signalk/v2/api/resources/waypoints`))[MARK_A]?.name ===
-      "TZ Mark 1",
+    async () => (await waypoints())[MARK_A]?.name === "TZ Mark 1",
   );
 
   console.log("== TimeZero -> Signal K: navigation");
@@ -373,7 +427,7 @@ async function defaultScenario() {
       properties: {},
     },
   });
-  const routeB = created.json?.id;
+  const routeB: unknown = created.json?.id;
   check(
     "Signal K created route B",
     created.status < 300 && typeof routeB === "string",
@@ -420,7 +474,7 @@ async function defaultScenario() {
       },
     },
   );
-  const routeC = createdC.json?.id;
+  const routeC: unknown = createdC.json?.id;
   await sleep(30000);
   const atLimit = await tz();
   check(
@@ -507,7 +561,7 @@ async function defaultScenario() {
       },
     },
   );
-  const regionB = createdRegion.json?.id;
+  const regionB: unknown = createdRegion.json?.id;
   await waitFor(
     "a Signal K region reaches TimeZero as an area",
     async () =>
@@ -632,10 +686,11 @@ async function defaultScenario() {
 // Signal K that already has routes, a waypoint, an old go-to and an anchor
 // down. Nothing of TimeZero's may change, and nothing Signal K had before the
 // plugin started may be pushed as if it were a change.
-async function firstContact(seed) {
-  const table = JSON.parse(fs.readFileSync(seed, "utf8"));
-  const row = (o) => {
-    const out = [];
+async function firstContact(seed: string): Promise<void> {
+  const table = JSON.parse(fs.readFileSync(seed, "utf8")) as UserObjectTableDto;
+  // The raw text of each column, quotes and all.
+  const row = (o: { Values: string }): string[] => {
+    const out: string[] = [];
     let cur = "";
     let q = false;
     for (const ch of o.Values) {
@@ -648,7 +703,7 @@ async function firstContact(seed) {
     out.push(cur);
     return out;
   };
-  const liveNoLayer = (type) =>
+  const liveNoLayer = (type: string) =>
     table.Objects.filter((o) => {
       const r = row(o);
       return r[0] === type && r[10] === "0" && r[12] === "NULL";
@@ -656,7 +711,7 @@ async function firstContact(seed) {
   const liveRoutes = table.Objects.filter(
     (o) => row(o)[0] === "5" && row(o)[10] === "0",
   ).length;
-  const skRoute = (lon) => ({
+  const skRoute = (lon: number) => ({
     name: `SK own route ${lon}`,
     feature: {
       type: "Feature",
@@ -670,7 +725,7 @@ async function firstContact(seed) {
       properties: {},
     },
   });
-  const SK_ROUTES = {
+  const SK_ROUTES: Record<string, unknown> = {
     "bbbbbbbb-0000-4000-8000-000000000001": skRoute(177.3),
     "bbbbbbbb-0000-4000-8000-000000000002": skRoute(177.4),
   };
@@ -731,10 +786,7 @@ async function firstContact(seed) {
   );
   await waitFor(
     `all of TimeZero's ${liveNoLayer("0")} marks are waypoints in Signal K`,
-    async () =>
-      Object.keys(await get(`${API}/signalk/v2/api/resources/waypoints`))
-        .length >=
-      liveNoLayer("0") + 1,
+    async () => Object.keys(await waypoints()).length >= liveNoLayer("0") + 1,
     180000,
   );
   await waitFor(
@@ -822,7 +874,7 @@ async function firstContact(seed) {
       try {
         const saved = JSON.parse(
           fs.readFileSync(path.join(state, "resources.json"), "utf8"),
-        );
+        ) as { known: Record<string, unknown> };
         return Object.keys(saved.known).length >= liveNoLayer("5");
       } catch {
         return false;
@@ -839,8 +891,10 @@ async function firstContact(seed) {
     pullsAfter.length === pullsBefore.length,
     pullsAfter.slice(pullsBefore.length).join("; "),
   );
-  const offered = JSON.parse(
-    fs.readFileSync(path.join(state, "peer.json"), "utf8"),
+  const offered = (
+    JSON.parse(fs.readFileSync(path.join(state, "peer.json"), "utf8")) as {
+      offered: Record<string, unknown>;
+    }
   ).offered;
   check(
     "after the restart nothing is offered",

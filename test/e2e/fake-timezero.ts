@@ -15,22 +15,48 @@
 // 172.31.x.x next to a real NavNet.
 //
 // Control API on :8080 — GET /state, POST /route, /navigate, /anchor.
+//
+// Node runs this file as it is (type stripping), so it imports the protocol
+// sources directly; only modules without imports of their own can be used.
 
-import dgram from "node:dgram";
-import http from "node:http";
 import crypto from "node:crypto";
+import dgram from "node:dgram";
+import fs from "node:fs";
+import http from "node:http";
+import type {
+  ActiveRouteDto,
+  AnchorWatchDto,
+} from "../../src/protocol/navigation.ts";
+import type {
+  UserObjectDto,
+  UserObjectTableDto,
+} from "../../src/protocol/userObject.ts";
 import {
   encodeCircle,
   encodePoint,
   encodePolyline,
   guidToBytes,
   toTzTime,
-} from "/plugin/dist/protocol/geometry.js";
+} from "../../src/protocol/geometry.ts";
 import {
   formatRow,
   formatValue,
   parseRow,
-} from "/plugin/dist/protocol/sqlRow.js";
+  type SqlValue,
+} from "../../src/protocol/sqlRow.ts";
+
+// [latitude, longitude], as the control API takes them.
+type Pair = [number, number];
+
+// What POST /navigate takes.
+interface NavigateRequest {
+  kind: "none" | "goto" | "route";
+  lat?: number;
+  lon?: number;
+  guid?: string;
+  index?: number;
+  mob?: boolean;
+}
 
 const USER_ID = process.env.USER_ID;
 const BROADCAST = process.env.BROADCAST;
@@ -45,42 +71,53 @@ const MAX_ROUTES = Number(process.env.MAX_ROUTES || 200);
 
 const s = {
   currentTick: 1000,
-  objects: new Map(), // guid -> { Guid, Tick, Values, PointsValues }
-  records: new Map(), // peer hostId -> tick the peer is synced to
+  objects: new Map<string, UserObjectDto>(),
+  // Peer hostId -> tick the peer is synced to.
+  records: new Map<string, number>(),
   activeRoute: navigation({ kind: "none" }, 3),
-  anchor: { ChangeTick: 50, Values: "NULL,10,0,0" },
+  anchor: { ChangeTick: 50, Values: "NULL,10,0,0" } as AnchorWatchDto,
   fishIt: { ChangeTick: 167, Values: "NULL,NULL,0,0,0,842852066,3000" },
-  log: [],
-  failures: [],
+  log: [] as string[],
+  failures: [] as string[],
 };
-const peers = new Map(); // address -> { hostId, lastSeen, claims }
-const log = (line) =>
+const peers = new Map<
+  string,
+  { hostId: string; lastSeen: number; claims: boolean }
+>();
+const log = (line: string): void => {
   s.log.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
+};
 
-function navigation(nav, tick) {
+function navigation(nav: NavigateRequest, tick: number): ActiveRouteDto {
   const NULL = "NULL";
   return {
     OriginPosition: NULL,
     TemporaryDestinationPosition:
       nav.kind === "goto"
-        ? formatValue(encodePoint({ latitude: nav.lat, longitude: nav.lon }))
+        ? formatValue(encodePoint({ latitude: nav.lat!, longitude: nav.lon! }))
         : NULL,
     IndexOfNextRealDestinationPoint: -1,
-    IndexOfDestinationPoint: nav.kind === "route" ? nav.index : -1,
+    IndexOfDestinationPoint: nav.kind === "route" ? nav.index! : -1,
     IsManOverBoard: nav.mob ? 1 : 0,
-    RouteGuid: nav.kind === "route" ? formatValue(guidToBytes(nav.guid)) : NULL,
+    RouteGuid:
+      nav.kind === "route" ? formatValue(guidToBytes(nav.guid!)) : NULL,
     LastModificationDate: toTzTime(new Date()),
     CurrentTick: tick,
   };
 }
 
-function routeObject(guid, name, points, deleted) {
+const toLatLon = ([latitude, longitude]: Pair) => ({ latitude, longitude });
+
+function routeObject(
+  guid: string,
+  name: string,
+  points: Pair[],
+  deleted?: boolean,
+): UserObjectDto {
   const now = toTzTime(new Date());
-  const values = [
+  const values: SqlValue[] = [
     5,
-    encodePolyline(
-      points.map(([latitude, longitude]) => ({ latitude, longitude })),
-    ),
+    encodePolyline(points.map(toLatLon)),
     now,
     now,
     0,
@@ -109,13 +146,16 @@ function routeObject(guid, name, points, deleted) {
   };
 }
 
-function areaObject(guid, name, corners, deleted) {
+function areaObject(
+  guid: string,
+  name: string,
+  corners: Pair[],
+  deleted?: boolean,
+): UserObjectDto {
   const now = toTzTime(new Date());
-  const values = [
+  const values: SqlValue[] = [
     8,
-    encodePolyline(
-      corners.map(([latitude, longitude]) => ({ latitude, longitude })),
-    ),
+    encodePolyline(corners.map(toLatLon)),
     now,
     now,
     0,
@@ -144,11 +184,16 @@ function areaObject(guid, name, corners, deleted) {
   };
 }
 
-function markObject(guid, name, [latitude, longitude], locked) {
+function markObject(
+  guid: string,
+  name: string,
+  position: Pair,
+  locked?: boolean,
+): UserObjectDto {
   const now = toTzTime(new Date());
-  const values = [
+  const values: SqlValue[] = [
     0,
-    encodePoint({ latitude, longitude }),
+    encodePoint(toLatLon(position)),
     now,
     now,
     0,
@@ -182,17 +227,18 @@ function markObject(guid, name, [latitude, longitude], locked) {
 const udp = dgram.createSocket({ type: "udp4", reuseAddr: true });
 udp.on("message", (msg, rinfo) => {
   const f = msg.toString("utf8").split(";");
-  if (f[0] !== "TZ Sync 1.0" || f[6] === HOST_ID || f[4] !== USER_ID) return;
+  const hostId = f[6] ?? "";
+  if (f[0] !== "TZ Sync 1.0" || hostId === HOST_ID || f[4] !== USER_ID) return;
   const known = peers.get(rinfo.address);
   const visibleHosts = Number(f[8]);
   const claims = visibleHosts > OWN_VISIBLE_HOSTS;
-  const isNew = !known || known.hostId !== f[6];
-  peers.set(rinfo.address, { hostId: f[6], lastSeen: Date.now(), claims });
+  const isNew = !known || known.hostId !== hostId;
+  peers.set(rinfo.address, { hostId, lastSeen: Date.now(), claims });
   if (isNew || (claims && !known.claims)) {
-    log(`peer ${f[6]} ${isNew ? "joined" : "claimed master"}`);
+    log(`peer ${hostId} ${isNew ? "joined" : "claimed master"}`);
     setTimeout(
       () =>
-        void round(rinfo.address).catch((e) =>
+        void round(rinfo.address).catch((e: Error) =>
           log(`round failed: ${e.message}`),
         ),
       1000,
@@ -209,7 +255,12 @@ udp.bind(33000, () => {
 
 // ---- the master's sync round ------------------------------------------------
 
-function request(address, method, path, body) {
+function request(
+  address: string,
+  method: string,
+  path: string,
+  body?: string,
+): Promise<{ status: number | undefined; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -222,7 +273,7 @@ function request(address, method, path, body) {
       },
       (res) => {
         let data = "";
-        res.on("data", (c) => (data += c));
+        res.on("data", (c: Buffer) => (data += c));
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       },
     );
@@ -232,8 +283,9 @@ function request(address, method, path, body) {
   });
 }
 
-async function round(address) {
+async function round(address: string): Promise<void> {
   const peer = peers.get(address);
+  if (!peer) return;
   const id = encodeURIComponent(HOST_ID);
   const lock = await request(
     address,
@@ -257,7 +309,7 @@ async function round(address) {
           `/LanSynchronizationApi/UserObject?MinTick=${record}&Limit=5000&CanUseLayers=False`,
         )
       ).body,
-    );
+    ) as UserObjectTableDto;
     for (const o of pulled.Objects) {
       s.objects.set(o.Guid, { ...o, Tick: ++s.currentTick });
       log(`round: pulled ${o.Guid} deleted=${parseRow(o.Values)[10]}`);
@@ -277,15 +329,16 @@ async function round(address) {
         RemainingToSync: 0,
         Objects: ours,
         Layers: [],
-      }),
+      } satisfies UserObjectTableDto),
     );
     log(`round: pushed ${ours.length} object(s) to ${peer.hostId}`);
     s.records.set(peer.hostId, s.currentTick);
     const theirs = JSON.parse(
       (await request(address, "GET", "/LanSynchronizationApi/ActiveRoute"))
         .body || "{}",
-    );
-    if (theirs.CurrentTick > s.activeRoute.CurrentTick) s.activeRoute = theirs;
+    ) as Partial<ActiveRouteDto>;
+    if ((theirs.CurrentTick ?? 0) > s.activeRoute.CurrentTick)
+      s.activeRoute = theirs as ActiveRouteDto;
     await request(
       address,
       "POST",
@@ -308,23 +361,22 @@ async function round(address) {
   }
 }
 
-function inLayer(o) {
+function inLayer(o: UserObjectDto): boolean {
   return parseRow(o.Values)[12] !== null;
 }
 
-function liveRoutes() {
+function liveRoutes(): UserObjectDto[] {
   return [...s.objects.values()].filter((o) => {
     const v = parseRow(o.Values);
     return v[0] === 5 && v[10] === 0;
   });
 }
 
-function trimRoutes() {
+function trimRoutes(): void {
   const live = liveRoutes();
   if (live.length <= MAX_ROUTES) return;
-  const oldest = live.sort(
-    (a, b) => parseRow(a.Values)[3] - parseRow(b.Values)[3],
-  )[0];
+  const modified = (o: UserObjectDto) => Number(parseRow(o.Values)[3]);
+  const oldest = live.sort((a, b) => modified(a) - modified(b))[0]!;
   const v = parseRow(oldest.Values);
   v[10] = 1;
   s.objects.set(oldest.Guid, {
@@ -337,15 +389,15 @@ function trimRoutes() {
 
 // ---- our own sync endpoint ----------------------------------------------------
 
-let lockHolder = null;
+let lockHolder: string | null = null;
 http
   .createServer((req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
+    req.on("data", (c: Buffer) => (body += c));
     req.on("end", () => {
-      const url = new URL(req.url, "http://tz");
+      const url = new URL(req.url ?? "/", "http://tz");
       const p = url.pathname;
-      const json = (o) =>
+      const json = (o: unknown) =>
         res
           .writeHead(200, { "Content-Type": "application/json" })
           .end(JSON.stringify(o));
@@ -375,11 +427,11 @@ http
           RemainingToSync: Math.max(0, newer.length - limit),
           Objects: newer.slice(0, limit),
           Layers: [],
-        });
+        } satisfies UserObjectTableDto);
       }
       if (p.endsWith("/UserObject") && req.method === "POST") {
         // What a real TimeZero does with this, and why a peer must not send it.
-        const t = JSON.parse(body);
+        const t = JSON.parse(body) as UserObjectTableDto;
         s.currentTick = t.CurrentTick;
         s.failures.push(
           `peer pushed a UserObject table (CurrentTick ${t.CurrentTick})`,
@@ -389,14 +441,14 @@ http
       if (p.endsWith("/ActiveRoute") && req.method === "GET")
         return json(s.activeRoute);
       if (p.endsWith("/ActiveRoute") && req.method === "POST") {
-        s.activeRoute = JSON.parse(body);
+        s.activeRoute = JSON.parse(body) as ActiveRouteDto;
         log(`peer pushed ActiveRoute tick ${s.activeRoute.CurrentTick}`);
         return res.writeHead(201).end();
       }
       if (p.endsWith("/AnchorWatch") && req.method === "GET")
         return json(s.anchor);
       if (p.endsWith("/AnchorWatch") && req.method === "POST") {
-        s.anchor = JSON.parse(body);
+        s.anchor = JSON.parse(body) as AnchorWatchDto;
         log(`peer pushed AnchorWatch tick ${s.anchor.ChangeTick}`);
         return res.writeHead(201).end();
       }
@@ -423,12 +475,24 @@ http
 
 // ---- control API ------------------------------------------------------------
 
+// The body of a control API request; which fields are set depends on the path.
+interface ControlRequest extends NavigateRequest {
+  name: string;
+  points: Pair[];
+  corners: Pair[];
+  position: Pair;
+  deleted?: boolean;
+  locked?: boolean;
+  raise?: boolean;
+  radius: number;
+}
+
 http
   .createServer((req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
+    req.on("data", (c: Buffer) => (body += c));
     req.on("end", () => {
-      const b = body ? JSON.parse(body) : {};
+      const b = (body ? JSON.parse(body) : {}) as ControlRequest;
       if (req.method === "POST" && req.url === "/route") {
         const o = routeObject(
           b.guid ?? crypto.randomUUID(),
@@ -460,7 +524,7 @@ http
         const now = toTzTime(new Date());
         const geometry = b.raise
           ? null
-          : encodeCircle({ latitude: b.lat, longitude: b.lon }, b.radius);
+          : encodeCircle({ latitude: b.lat!, longitude: b.lon! }, b.radius);
         s.anchor = {
           ChangeTick: s.anchor.ChangeTick + 1,
           Values: `${formatValue(geometry)},10,${now},${now}`,
@@ -494,8 +558,9 @@ http
 // Start from a captured TimeZero table (SEED: a UserObject read with
 // CanUseLayers=True), or from one route and one mark.
 if (process.env.SEED) {
-  const { readFileSync } = await import("node:fs");
-  const seed = JSON.parse(readFileSync(process.env.SEED, "utf8"));
+  const seed = JSON.parse(
+    fs.readFileSync(process.env.SEED, "utf8"),
+  ) as UserObjectTableDto;
   for (const o of seed.Objects) s.objects.set(o.Guid, o);
   s.currentTick = seed.CurrentTick;
   console.log(`seeded ${seed.Objects.length} objects at tick ${s.currentTick}`);
@@ -503,7 +568,7 @@ if (process.env.SEED) {
   seedDemo();
 }
 
-function seedDemo() {
+function seedDemo(): void {
   const routeA = routeObject(
     "aaaaaaaa-0000-4000-8000-000000000001",
     "TZ Route A",
