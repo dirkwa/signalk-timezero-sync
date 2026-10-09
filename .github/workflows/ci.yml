@@ -1,3 +1,7 @@
+# Signal K's shared plugin CI: tests and build on Linux x64 and arm64, macOS
+# and Windows, checks the package the way the App Store installs it, and loads
+# the plugin in a real Signal K server. Pinned to a signalk-server commit, so a
+# change there reaches this repo only through a PR here.
 name: CI
 
 on:
@@ -9,23 +13,9 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node: [22, 24]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      # The App Store installs plugins with --ignore-scripts, so nothing may
-      # depend on an install script having run.
-      - run: npm ci --ignore-scripts
-      - run: npm run ci-lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+  plugin-ci:
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@144d4bc8591c3a54465baf6736f4a20e245d057f # master
+    with:
+      # eslint, prettier and tsc; plugin-ci runs this through eval.
+      format-check-command: npm run ci-lint && npm run typecheck
+      enable-signalk-integration: true
