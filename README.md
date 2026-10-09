@@ -109,6 +109,11 @@ nor lets its older state overwrite a newer one.
   in TimeZero; end it at the plotter. A MOB that TimeZero started while Signal K
   was off, or before a Signal K restart, does not raise the alarm in Signal K.
   TimeZero's MOB event marks are not synced.
+- **TimeZero's MOB button does not reach Signal K.** On the TZ Professional
+  this was tested with, the button only drops an event mark: TimeZero starts
+  no MOB navigation and no alarm, so there is nothing to sync. A MOB raised in
+  Signal K does start TimeZero's MOB navigation, so raise a MOB from Signal K
+  (for example Freeboard) when both should have it.
 - TimeZero marks, routes and areas in user layers are left alone.
 - Circles, lines, events and tracks are not synced.
 - TimeZero has no reverse flag, so a route followed in reverse in Signal K is not
