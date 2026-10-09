@@ -1,5 +1,6 @@
-# Commit prefixes are what release-please reads: a runtime dependency update
-# is a fix and makes a release, a dev dependency or CI update does not.
+# Commit prefixes are what the release-please gate and label-by-title read:
+# build(deps) is a runtime update and makes a release, build(deps-dev) and ci
+# do not.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -7,8 +8,8 @@ updates:
     schedule:
       interval: weekly
     commit-message:
-      prefix: fix
-      prefix-development: chore
+      prefix: build
+      prefix-development: build
       include: scope
     groups:
       dev-dependencies:

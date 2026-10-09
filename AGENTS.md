@@ -107,10 +107,13 @@ start-up safe` commit):
 - Code style: TypeScript, ESM, strict. Comments explain why. Keep the protocol
   layer free of I/O.
 - Commits: conventional commits, one logical change each.
-- Changes go to `main` through pull requests. release-please reads the
-  conventional commits on `main` and keeps a release PR open; merging it tags
-  the release, and `.github/workflows/publish.yml` publishes it to npm through
-  trusted publishing. Never bump the version or write `CHANGELOG.md` by hand.
+- Changes go to `main` through pull requests, with a conventional-commit
+  title: the title sets the PR's label (`label-by-title.yml`), and the labels
+  sort GitHub's release notes (`.github/release.yml`). release-please keeps a
+  release PR open while `main` has a feat, fix, perf or runtime dependency
+  change; merging it tags the release and dispatches `publish.yml`, which
+  publishes to npm through trusted publishing. Never bump the version or
+  publish by hand.
 
 ## Commands
 

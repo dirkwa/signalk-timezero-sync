@@ -1,0 +1,75 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+  # Re-runs release-please on demand, e.g. to rewrite an open release PR
+  # after a config change, which the gate below would otherwise skip.
+  workflow_dispatch:
+
+permissions: {}
+
+# One run at a time: two runs could each read and write the release PR, and
+# a run creating a tag or dispatching the publish must never be killed.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  # GitHub's release notes are never empty, so release-please would propose a
+  # release after every merge, docs and ci included. Only a push carrying a
+  # change users get goes on: feat, fix, perf, revert, a breaking change, a
+  # runtime dependency bump (Dependabot scopes those `deps`, dev ones
+  # `deps-dev`), or the merge of the release PR itself, which creates the tag.
+  # The payload holds at most 2048 commits; a push that fills it goes on.
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      releasable: ${{ steps.check.outputs.releasable }}
+    steps:
+      - id: check
+        env:
+          DISPATCHED: ${{ github.event_name == 'workflow_dispatch' }}
+          MESSAGES: ${{ toJSON(github.event.commits.*.message) }}
+          RELEASABLE: '^((feat|fix|perf|revert)(\([^)]*\))?!?: |[a-z]+(\([^)]*\))?!: |build\(deps\): |Revert |chore(\([^)]*\))?: release v?[0-9])'
+        run: |
+          if [ "$DISPATCHED" = true ]; then
+            echo "releasable=true" >> "$GITHUB_OUTPUT"
+            echo "Run requested manually; release-please not gated."
+            exit 0
+          fi
+          if jq -e --arg re "$RELEASABLE" '(length >= 2048) or ([.[] | (split("\n")[0] | test($re)) or test("\nBREAKING[- ]CHANGE: ")] | any)' <<< "$MESSAGES" > /dev/null; then
+            echo "releasable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "releasable=false" >> "$GITHUB_OUTPUT"
+            echo "No releasable commit in this push; release-please not run."
+          fi
+
+  release-please:
+    needs: gate
+    if: ${{ needs.gate.outputs.releasable == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: rp
+
+  # A tag pushed with GITHUB_TOKEN starts no workflow, workflow_dispatch
+  # excepted, so publish.yml is dispatched on the new tag. It stays the file
+  # that publishes because npm's trusted publisher is bound to it.
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
