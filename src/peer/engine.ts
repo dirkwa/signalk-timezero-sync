@@ -86,6 +86,11 @@ export interface PeerEvents {
   status: [string];
 }
 
+export interface LiveCounts {
+  routes: number;
+  boundaries: number | null;
+}
+
 interface HttpResult {
   status: number;
   body: string;
@@ -369,18 +374,35 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     return null;
   }
 
-  // TimeZero's own count of live routes, layers included, from its sync
+  // TimeZero's own counts of live objects, layers included, from its sync
   // diagnostics page. null when there is no TimeZero or the page has changed.
-  async liveRouteCount(): Promise<number | null> {
+  async liveCounts(): Promise<LiveCounts | null> {
     const address = this.timeZeroAddress();
     if (!address) return null;
     try {
       const res = await this.request(address, "GET", `${API}/`);
-      const m = /<td>Routes<\/td>\s*<td>(\d+)<\/td>/.exec(res.body);
-      return m ? Number(m[1]) : null;
+      const count = (name: string) => {
+        const m = new RegExp(`<td>${name}</td>\\s*<td>(\\d+)</td>`).exec(
+          res.body,
+        );
+        return m ? Number(m[1]) : null;
+      };
+      const routes = count("Routes");
+      const areas = count("Areas");
+      const lines = count("Lines");
+      if (routes === null) return null;
+      return {
+        routes,
+        // Areas and lines share TimeZero's boundary limit.
+        boundaries: areas === null || lines === null ? null : areas + lines,
+      };
     } catch {
       return null;
     }
+  }
+
+  async liveRouteCount(): Promise<number | null> {
+    return (await this.liveCounts())?.routes ?? null;
   }
 
   // ---- pulls and pushes ---------------------------------------------------

@@ -53,6 +53,12 @@ of it.
   syncs. The live count is on its diagnostics page
   (`GET /LanSynchronizationApi/`); new routes are only offered while there is
   room, and routes over 500 points are not offered.
+- A MOB is a go-to with `IsManOverBoard` set in the ActiveRoute record. The
+  MOB marks on the boat's TimeZero look like locked events (ObjectType 7,
+  icon 67; not confirmed live), which are not synced. Locked objects have
+  `Locked` = 1 (column 11). Areas are ObjectType 8 with their corners as a
+  polyline blob; TimeZero holds 100 areas and lines together, of up to 50
+  corners.
 - Timestamps count seconds from 2000-01-01. GUIDs travel in .NET byte order.
 
 ## What the Signal K side must not do

@@ -11,13 +11,17 @@ import {
 } from "../src/bridge/course.js";
 import {
   fingerprint,
+  fromSkRegion,
   fromSkRoute,
   fromSkWaypoint,
+  toSkRegion,
   toSkRoute,
   toSkWaypoint,
   tombstone,
 } from "../src/bridge/mapping.js";
+import { MobBridge } from "../src/bridge/mob.js";
 import { ResourcesBridge } from "../src/bridge/resources.js";
+import type { Region } from "@signalk/server-api";
 import { TimeZeroPeer } from "../src/peer/engine.js";
 import { encodePolyline } from "../src/protocol/geometry.js";
 import {
@@ -62,7 +66,81 @@ const asObject = (o: Omit<UserObject, "tick">, tick = 1): UserObject => ({
   tick,
 });
 
+const region: Region = {
+  name: "No anchoring",
+  description: "cable area",
+  feature: {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [
+        [
+          [177.15, -17.8],
+          [177.16, -17.8],
+          [177.16, -17.81],
+          [177.15, -17.81],
+          [177.15, -17.8],
+        ],
+      ],
+    },
+    properties: {},
+  },
+};
+
 describe("mapping", () => {
+  test("reads an area as TimeZero sends it, as a closed polygon", () => {
+    // A live area from a TZ Professional on a boat's NavNet.
+    const tz = parseUserObject({
+      Guid: ID,
+      Tick: 30000,
+      Values:
+        "8,X'029B530C38F4FDAB019B536330F4FD5C249B533B54F4FD1C4C9B52D23EF4FD7DF0',749161040,749161180,0,9,'',NULL,NULL,0,0,0,NULL,0,NULL,NULL,'40',NULL,NULL,NULL,NULL",
+      PointsValues: null,
+    });
+    const r = toSkRegion(tz)!;
+    const ring = (r.feature.geometry.coordinates as number[][][])[0]!;
+    expect(ring).toHaveLength(5);
+    expect(ring[4]).toEqual(ring[0]);
+    expect(ring[0]![0]).toBeCloseTo(-151.6, 0);
+    expect(ring[0]![1]).toBeCloseTo(-16.5, 0);
+  });
+
+  test("a Signal K region survives a trip through TimeZero", () => {
+    const tz = asObject(fromSkRegion(ID, region, undefined, NOW)!);
+    expect(tz.values[COLUMN.objectType]).toBe(8);
+    expect(tz.values[COLUMN.value3]).toBe("40");
+    const back = toSkRegion(tz)!;
+    expect(back.name).toBe(region.name);
+    expect(back.description).toBe(region.description);
+    expect(fingerprint("regions", back)).toBe(fingerprint("regions", region));
+  });
+
+  test("leaves out regions TimeZero cannot hold", () => {
+    const ring = (
+      region.feature.geometry.coordinates as [number, number][][]
+    )[0]!;
+    const withHole: Region = {
+      ...region,
+      feature: {
+        ...region.feature,
+        geometry: { type: "Polygon", coordinates: [ring, ring] },
+      },
+    };
+    expect(fromSkRegion(ID, withHole, undefined, NOW)).toBeNull();
+    const many = Array.from({ length: 51 }, (_, i): [number, number] => [
+      177 + Math.cos(i / 8),
+      -17 + Math.sin(i / 8),
+    ]);
+    const tooMany: Region = {
+      ...region,
+      feature: {
+        ...region.feature,
+        geometry: { type: "Polygon", coordinates: [[...many, many[0]!]] },
+      },
+    };
+    expect(fromSkRegion(ID, tooMany, undefined, NOW)).toBeNull();
+  });
+
   test("a Signal K route survives a trip through TimeZero", () => {
     const tz = asObject(fromSkRoute(ID, route, undefined, NOW)!);
     expect(tz.values[COLUMN.objectType]).toBe(5);
@@ -135,6 +213,7 @@ function mockApp(onWrite: (type: string, id: string, value: unknown) => void) {
   const store: Record<string, Record<string, unknown>> = {
     routes: {},
     waypoints: {},
+    regions: {},
   };
   return {
     store,
@@ -186,8 +265,12 @@ describe("resources bridge", () => {
 
   function setup(offerExisting = true, liveRoutes: number | null = 150) {
     const peer = makePeer();
-    const count = { live: liveRoutes };
-    vi.spyOn(peer, "liveRouteCount").mockImplementation(async () => count.live);
+    const count = { live: liveRoutes, boundaries: 2 };
+    vi.spyOn(peer, "liveCounts").mockImplementation(async () =>
+      count.live === null
+        ? null
+        : { routes: count.live, boundaries: count.boundaries },
+    );
     const offers: string[] = [];
     vi.spyOn(peer, "offer").mockImplementation((objs) =>
       offers.push(...objs.map((o) => o.guid)),
@@ -199,7 +282,7 @@ describe("resources bridge", () => {
       ref.bridge?.onResourceDelta(type as "routes", id, value),
     );
     const bridge = new ResourcesBridge(app, peer, {
-      types: ["routes", "waypoints"],
+      types: ["routes", "waypoints", "regions"],
       stateFile: path.join(dir, "resources.json"),
       offerExisting,
       maxRoutes: 200,
@@ -305,7 +388,7 @@ describe("resources bridge", () => {
       await vi.runAllTimersAsync();
       expect(offers).toEqual([]);
       expect(status).toHaveBeenCalledWith(
-        expect.stringContaining("200-route limit"),
+        expect.stringContaining("at most 200 routes"),
       );
     });
 
@@ -356,8 +439,8 @@ describe("resources bridge", () => {
       const count = { live: 199 as number | null };
       const makeBridge = (offers: string[]) => {
         const peer = makePeer();
-        vi.spyOn(peer, "liveRouteCount").mockImplementation(
-          async () => count.live,
+        vi.spyOn(peer, "liveCounts").mockImplementation(async () =>
+          count.live === null ? null : { routes: count.live, boundaries: 2 },
         );
         vi.spyOn(peer, "requestRound").mockImplementation(() => {});
         const real = peer.offer.bind(peer);
@@ -395,8 +478,8 @@ describe("resources bridge", () => {
       // two commits both would see one free place.
       let answer!: () => void;
       const gate = new Promise<void>((r) => (answer = r));
-      vi.mocked(peer.liveRouteCount).mockImplementation(() =>
-        gate.then(() => 199),
+      vi.mocked(peer.liveCounts).mockImplementation(() =>
+        gate.then(() => ({ routes: 199, boundaries: 2 })),
       );
       store.routes![newRoute(2)] = route;
       bridge.onResourceDelta("routes", newRoute(1), route);
@@ -452,6 +535,41 @@ describe("resources bridge", () => {
     await vi.runAllTimersAsync();
     expect(offers).toEqual([]);
     expect(status).toHaveBeenCalledWith(expect.stringContaining("500 points"));
+  });
+
+  test("a new region waits while TimeZero holds 100 areas and lines", async () => {
+    const { bridge, offers, count, status } = setup();
+    count.boundaries = 100;
+    bridge.onResourceDelta("regions", ID, region);
+    await vi.runAllTimersAsync();
+    expect(offers).toEqual([]);
+    expect(status).toHaveBeenCalledWith(
+      expect.stringContaining("100 areas and lines"),
+    );
+    count.boundaries = 99;
+    bridge.onResourceDelta("regions", ID, region);
+    await vi.runAllTimersAsync();
+    expect(offers).toEqual([ID]);
+  });
+
+  test("a change to an object locked in TimeZero is undone, not sent", async () => {
+    const { bridge, store, offers, status } = setup();
+    const locked = tzRoute();
+    locked.values[COLUMN.locked] = 1;
+    await bridge.fromTimeZero([locked], 33430);
+    await vi.runAllTimersAsync();
+    bridge.onResourceDelta("routes", ID, null); // deleted in Freeboard
+    delete store.routes![ID];
+    await vi.runAllTimersAsync();
+    expect(offers).toEqual([]);
+    expect((store.routes![ID] as Route).name).toBe("SK test route");
+    expect(status).toHaveBeenCalledWith(
+      expect.stringContaining("locked in TimeZero"),
+    );
+    bridge.onResourceDelta("routes", ID, { ...route, name: "Moved" });
+    await vi.runAllTimersAsync();
+    expect(offers).toEqual([]);
+    expect((store.routes![ID] as Route).name).toBe("SK test route");
   });
 
   test("on start, leaves them alone when offering existing ones is off", async () => {
@@ -543,6 +661,28 @@ describe("course bridge", () => {
 
   test("leaves TimeZero alone for a reversed route", () => {
     expect(toNavigation(routeCourse(true) as never)).toBeNull();
+  });
+
+  test("a Signal K go-to to the MOB position keeps TimeZero's MOB", async () => {
+    const peer = makePeer();
+    const mobNav = {
+      kind: "goto" as const,
+      origin: null,
+      destination: { latitude: -17.822, longitude: 177.171 },
+      mob: true,
+    };
+    (peer as unknown as { state: { navigation: unknown } }).state.navigation =
+      mobNav;
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, state } = courseApp(noCourse);
+    const bridge = new CourseBridge(app, peer);
+    await vi.runAllTimersAsync();
+    state.course = {
+      ...staleGoto,
+      startTime: new Date().toISOString(),
+    };
+    await bridge.fromSignalK();
+    expect(set).not.toHaveBeenCalled();
   });
 
   test("compares courses by what is navigated to, not the origin", () => {
@@ -849,5 +989,93 @@ describe("anchor bridge", () => {
     expect(sameAnchor(a, { ...a, radius: 60.001 })).toBe(true);
     expect(sameAnchor(a, null)).toBe(false);
     expect(sameAnchor(null, null)).toBe(true);
+  });
+});
+
+describe("man overboard", () => {
+  const MOB_AT = { latitude: -17.8, longitude: 177.15 };
+  const mobNav = {
+    kind: "goto" as const,
+    origin: MOB_AT,
+    destination: MOB_AT,
+    mob: true,
+  };
+
+  function mobApp() {
+    const ref: { bridge?: MobBridge } = {};
+    const raised: string[] = [];
+    const cleared: string[] = [];
+    const app = {
+      notifications: {
+        mob: vi.fn(() => {
+          const id = `id-${raised.length + 1}`;
+          raised.push(id);
+          // The alarm's delta arrives before mob() returns.
+          ref.bridge?.onMobDelta(`notifications.mob.${id}`, {
+            state: "emergency",
+            createdAt: new Date().toISOString(),
+            position: MOB_AT,
+          });
+          return id;
+        }),
+        clear: vi.fn((id: string) => cleared.push(id)),
+      },
+      getSelfPath: () => ({ value: MOB_AT }),
+      debug: () => {},
+      error: vi.fn(),
+    } as unknown as ServerAPI;
+    return { app, ref, raised, cleared };
+  }
+
+  test("a MOB in TimeZero raises Signal K's alarm once, and its end clears it", () => {
+    const peer = makePeer();
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, ref, raised, cleared } = mobApp();
+    ref.bridge = new MobBridge(app, peer);
+    peer.emit("navigation", mobNav);
+    peer.emit("navigation", mobNav); // TimeZero updating its record
+    expect(raised).toEqual(["id-1"]);
+    // Our own alarm is not sent back to TimeZero as a new MOB.
+    expect(set).not.toHaveBeenCalled();
+    peer.emit("navigation", { kind: "none" });
+    expect(cleared).toEqual(["id-1"]);
+  });
+
+  test("a MOB raised in Signal K becomes a MOB go-to in TimeZero", () => {
+    const peer = makePeer();
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, ref } = mobApp();
+    ref.bridge = new MobBridge(app, peer);
+    ref.bridge.onMobDelta("notifications.mob.abc", {
+      state: "emergency",
+      createdAt: new Date().toISOString(),
+      position: MOB_AT,
+    });
+    // The same alarm updated (silenced, acknowledged) is not a new MOB.
+    ref.bridge.onMobDelta("notifications.mob.abc", {
+      state: "emergency",
+      createdAt: new Date().toISOString(),
+      position: MOB_AT,
+    });
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(set).toHaveBeenCalledWith({
+      kind: "goto",
+      origin: MOB_AT,
+      destination: MOB_AT,
+      mob: true,
+    });
+  });
+
+  test("a MOB alarm from before the plugin started is not sent", () => {
+    const peer = makePeer();
+    const set = vi.spyOn(peer, "setNavigation");
+    const { app, ref } = mobApp();
+    ref.bridge = new MobBridge(app, peer);
+    ref.bridge.onMobDelta("notifications.mob", {
+      state: "emergency",
+      createdAt: "2026-10-01T00:00:00Z",
+      position: MOB_AT,
+    });
+    expect(set).not.toHaveBeenCalled();
   });
 });

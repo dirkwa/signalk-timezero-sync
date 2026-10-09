@@ -1,11 +1,12 @@
-// Keeps Signal K routes and waypoints and TimeZero routes and marks in step.
+// Keeps Signal K routes, waypoints and regions and TimeZero routes, marks and
+// areas in step.
 //
 // TimeZero -> Signal K: objects TimeZero pushes during a sync round are written
 // through the Resources API. Signal K -> TimeZero: a changed resource is offered
 // to TimeZero, which pulls it in its next round (see TimeZeroPeer.offer).
 
 import fs from "node:fs";
-import type { Route, ServerAPI, Waypoint } from "@signalk/server-api";
+import type { Region, Route, ServerAPI, Waypoint } from "@signalk/server-api";
 import type { TimeZeroPeer } from "../peer/engine.js";
 import {
   formatUserObject,
@@ -15,14 +16,18 @@ import {
 } from "../protocol/userObject.js";
 import {
   fingerprint,
+  fromSkRegion,
   fromSkRoute,
   fromSkWaypoint,
   inUserLayer,
   isDeleted,
+  isLocked,
+  MAX_AREA_CORNERS,
+  regionCorners,
   tombstone,
-  toSkRoute,
-  toSkWaypoint,
+  toSkResource,
   typeOf,
+  type SkResource,
   type SyncedType,
 } from "./mapping.js";
 
@@ -43,15 +48,22 @@ export interface ResourcesBridgeOptions {
   maxRoutes: number;
 }
 
+// Object kinds TimeZero limits in number; a new one is only sent while there
+// is room.
+type Limited = "routes" | "regions";
+
 interface Candidate {
   obj: Omit<UserObject, "tick">;
-  newRoute: boolean;
+  // Set for a new object of a kind TimeZero limits.
+  limited: Limited | null;
   record: () => void;
 }
 
 const CHANGE_SETTLE_MS = 1000;
 // TimeZero's synced layer holds routes of at most 500 points.
 const MAX_ROUTE_POINTS = 500;
+// TimeZero's synced layer holds at most 100 areas and lines together.
+const MAX_BOUNDARIES = 100;
 
 interface SavedState {
   known: Record<string, Known>;
@@ -61,11 +73,12 @@ interface SavedState {
   tableTick: number;
   // Every route and mark guid TimeZero has sent, deleted ones included.
   seen: string[];
-  // New routes offered but not yet pulled: each holds one of TimeZero's
-  // places until it is pulled, across restarts too.
+  // New routes and areas offered but not yet pulled: each holds one of
+  // TimeZero's places until it is pulled, across restarts too.
   awaitingNew: string[];
-  // New routes held back for lack of room, retried when room may open up.
-  held: string[];
+  // New routes and areas held back for lack of room, retried when room may
+  // open up. A list in older state files, which held routes only.
+  held: Record<string, Limited> | string[];
 }
 
 export class ResourcesBridge {
@@ -75,7 +88,7 @@ export class ResourcesBridge {
   // Whether `known` covers TimeZero's table up to `tableTick`.
   private inStep: boolean;
   private awaitingNew: Set<string>;
-  private held: Set<string>;
+  private held: Map<string, Limited>;
   private pending = new Map<string, { type: SyncedType; value: unknown }>();
   private flushTimer: NodeJS.Timeout | null = null;
   // Imports, offers and the start-up check run one at a time. A check that
@@ -102,7 +115,11 @@ export class ResourcesBridge {
     this.awaitingNew = new Set(
       saved.awaitingNew.filter((g) => peer.isPending(g)),
     );
-    this.held = new Set(saved.held);
+    this.held = new Map(
+      Array.isArray(saved.held)
+        ? saved.held.map((g) => [g, "routes" as const])
+        : Object.entries(saved.held),
+    );
     peer.on(
       "objects",
       (objects, tick) => void this.fromTimeZero(objects, tick),
@@ -132,8 +149,8 @@ export class ResourcesBridge {
     return run;
   }
 
-  // Routes held back for TimeZero's limit go once there may be room: after a
-  // pull, or after TimeZero sent deletions.
+  // Routes and areas held back for TimeZero's limits go once there may be
+  // room: after a pull, or after TimeZero sent deletions.
   private retryHeld(): void {
     if (this.held.size) void this.reconcile();
   }
@@ -166,7 +183,7 @@ export class ResourcesBridge {
           await this.app.resourcesApi.deleteResource(type, obj.guid);
           continue;
         }
-        const resource = type === "routes" ? toSkRoute(obj) : toSkWaypoint(obj);
+        const resource = toSkResource(type, obj);
         if (!resource) continue;
         const print = fingerprint(type, resource);
         const unchanged = known?.fingerprint === print;
@@ -224,12 +241,7 @@ export class ResourcesBridge {
       const candidates: Candidate[] = [];
       for (const [id, { type, value }] of changes) {
         if (value === null) this.held.delete(id);
-        const c = this.candidate(
-          type,
-          id,
-          value as Route | Waypoint | null,
-          now,
-        );
+        const c = this.candidate(type, id, value as SkResource | null, now);
         if (c) candidates.push(c);
       }
       await this.commitNow(candidates);
@@ -237,20 +249,31 @@ export class ResourcesBridge {
   }
 
   // What to offer for a Signal K change, without recording anything yet: a
-  // new route may still be held back by TimeZero's route limit.
+  // new route or area may still be held back by TimeZero's limits.
   private candidate(
     type: SyncedType,
     id: string,
-    resource: Route | Waypoint | null,
+    resource: SkResource | null,
     now: Date,
   ): Candidate | null {
     const known = this.known[id];
     const previous = known ? parseUserObject(known.tz) : undefined;
+    // TimeZero keeps a locked object from being moved or deleted. Signal K
+    // has no lock, so a change made there is undone rather than sent.
+    if (
+      known &&
+      previous &&
+      isLocked(previous) &&
+      (resource === null || fingerprint(type, resource) !== known.fingerprint)
+    ) {
+      void this.enqueue(() => this.restoreLocked(type, id, previous));
+      return null;
+    }
     if (resource === null) {
       if (!previous) return null;
       return {
         obj: tombstone(previous, now),
-        newRoute: false,
+        limited: null,
         record: () => delete this.known[id],
       };
     }
@@ -266,14 +289,25 @@ export class ResourcesBridge {
       );
       return null;
     }
+    if (type === "regions") {
+      const corners = regionCorners(resource as Region);
+      if (!corners || corners.length > MAX_AREA_CORNERS) {
+        this.app.setPluginStatus(
+          `Region "${resource.name ?? id}" not sent: TimeZero takes one outline without holes, of 3 to ${MAX_AREA_CORNERS} corners`,
+        );
+        return null;
+      }
+    }
     const obj =
       type === "routes"
         ? fromSkRoute(id, resource as Route, previous, now)
-        : fromSkWaypoint(id, resource as Waypoint, previous, now);
+        : type === "regions"
+          ? fromSkRegion(id, resource as Region, previous, now)
+          : fromSkWaypoint(id, resource as Waypoint, previous, now);
     if (!obj) return null;
     return {
       obj,
-      newRoute: type === "routes" && !known,
+      limited: !known && type !== "waypoints" ? type : null,
       record: () => {
         this.known[id] = {
           type,
@@ -284,40 +318,77 @@ export class ResourcesBridge {
     };
   }
 
+  private async restoreLocked(
+    type: SyncedType,
+    id: string,
+    obj: UserObject,
+  ): Promise<void> {
+    const resource = toSkResource(type, obj);
+    if (!resource) return;
+    this.app.setPluginStatus(
+      `"${resource.name ?? id}" is locked in TimeZero: unlock it there to change or delete it`,
+    );
+    await this.app.resourcesApi.setResource(
+      type,
+      id,
+      resource as unknown as Record<string, unknown>,
+    );
+  }
+
   // TimeZero's synced layer holds at most 200 routes, and TimeZero makes room
   // for a new one by deleting the route modified longest ago, on every device
-  // it syncs with. So a new Signal K route is only sent while there is room.
+  // it syncs with. So a new Signal K route is only sent while there is room;
+  // a new area likewise, within TimeZero's 100 areas and lines.
   private async commitNow(candidates: Candidate[]): Promise<void> {
-    const newRoutes = candidates.filter((c) => c.newRoute);
-    let accepted = candidates.filter((c) => !c.newRoute);
-    if (newRoutes.length) {
-      const room = await this.routeRoom();
-      const fits = newRoutes.slice(0, room);
-      const held = newRoutes.slice(room);
-      accepted = accepted.concat(fits);
-      fits.forEach((c) => this.held.delete(c.obj.guid));
-      held.forEach((c) => this.held.add(c.obj.guid));
+    const accepted = candidates.filter((c) => !c.limited);
+    const limited = candidates.filter((c) => c.limited);
+    if (limited.length) {
+      const room = await this.room();
+      const held: Candidate[] = [];
+      for (const c of limited) {
+        const kind = c.limited!;
+        if (room[kind] > 0) {
+          room[kind]--;
+          accepted.push(c);
+          this.held.delete(c.obj.guid);
+        } else {
+          held.push(c);
+          this.held.set(c.obj.guid, kind);
+        }
+      }
       if (held.length)
         this.app.setPluginStatus(
-          `${held.length} new route(s) not sent: TimeZero is at its ${this.opts.maxRoutes}-route limit`,
+          `${held.length} new route(s) or area(s) not sent: TimeZero has no room (at most ${this.opts.maxRoutes} routes, ${MAX_BOUNDARIES} areas and lines)`,
         );
       if (held.length && !accepted.length) this.save();
     }
     if (!accepted.length) return;
     for (const c of accepted) c.record();
-    for (const c of accepted) if (c.newRoute) this.awaitingNew.add(c.obj.guid);
+    for (const c of accepted) if (c.limited) this.awaitingNew.add(c.obj.guid);
     this.save();
     this.peer.offer(accepted.map((c) => c.obj));
     this.app.debug(`offered ${accepted.length} object(s) to TimeZero`);
     this.peer.requestRound();
   }
 
-  private async routeRoom(): Promise<number> {
-    if (this.opts.maxRoutes <= 0) return Number.MAX_SAFE_INTEGER;
-    const live = await this.peer.liveRouteCount();
-    // Without TimeZero's count, sending a new route could cost an old one.
-    if (live === null) return 0;
-    return Math.max(0, this.opts.maxRoutes - live - this.awaitingNew.size);
+  // Places left in TimeZero for new routes and areas, less those offered and
+  // not yet pulled. Without TimeZero's counts, none: sending a new route
+  // could cost an old one.
+  private async room(): Promise<Record<Limited, number>> {
+    const waiting = (kind: Limited) =>
+      [...this.awaitingNew].filter((g) => this.known[g]?.type === kind).length;
+    const counts = await this.peer.liveCounts();
+    const routes =
+      this.opts.maxRoutes <= 0
+        ? Number.MAX_SAFE_INTEGER
+        : counts
+          ? this.opts.maxRoutes - counts.routes - waiting("routes")
+          : 0;
+    const regions =
+      counts?.boundaries != null
+        ? MAX_BOUNDARIES - counts.boundaries - waiting("regions")
+        : 0;
+    return { routes: Math.max(0, routes), regions: Math.max(0, regions) };
   }
 
   // Signal K resources TimeZero does not have yet, and edits made while the
@@ -348,12 +419,11 @@ export class ResourcesBridge {
         // object, perhaps deleted there since. Offering it would overwrite or
         // bring back TimeZero's copy.
         if (!this.known[id] && this.seen.has(id)) continue;
-        const c = this.candidate(type, id, resource as Route | Waypoint, now);
+        const c = this.candidate(type, id, resource as SkResource, now);
         if (c) candidates.push(c);
       }
-      if (type === "routes")
-        for (const id of this.held)
-          if (!(id in resources)) this.held.delete(id);
+      for (const [id, kind] of this.held)
+        if (kind === type && !(id in resources)) this.held.delete(id);
     }
     await this.commitNow(candidates);
   }
@@ -366,7 +436,7 @@ export class ResourcesBridge {
         tableTick: this.tableTick,
         seen: [...this.seen],
         awaitingNew: [...this.awaitingNew],
-        held: [...this.held],
+        held: Object.fromEntries(this.held),
       };
       fs.writeFileSync(tmp, JSON.stringify(state));
       fs.renameSync(tmp, this.opts.stateFile);
@@ -387,6 +457,6 @@ function loadState(file: string): SavedState {
       held: s.held ?? [],
     };
   } catch {
-    return { known: {}, tableTick: 0, seen: [], awaitingNew: [], held: [] };
+    return { known: {}, tableTick: 0, seen: [], awaitingNew: [], held: {} };
   }
 }

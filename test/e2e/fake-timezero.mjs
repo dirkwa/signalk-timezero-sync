@@ -67,7 +67,7 @@ function navigation(nav, tick) {
         : NULL,
     IndexOfNextRealDestinationPoint: -1,
     IndexOfDestinationPoint: nav.kind === "route" ? nav.index : -1,
-    IsManOverBoard: 0,
+    IsManOverBoard: nav.mob ? 1 : 0,
     RouteGuid: nav.kind === "route" ? formatValue(guidToBytes(nav.guid)) : NULL,
     LastModificationDate: toTzTime(new Date()),
     CurrentTick: tick,
@@ -109,7 +109,42 @@ function routeObject(guid, name, points, deleted) {
   };
 }
 
-function markObject(guid, name, [latitude, longitude]) {
+function areaObject(guid, name, corners, deleted) {
+  const now = toTzTime(new Date());
+  const values = [
+    8,
+    encodePolyline(
+      corners.map(([latitude, longitude]) => ({ latitude, longitude })),
+    ),
+    now,
+    now,
+    0,
+    9,
+    name,
+    null,
+    null,
+    0,
+    deleted ? 1 : 0,
+    0,
+    null,
+    0,
+    null,
+    null,
+    "40",
+    null,
+    null,
+    null,
+    null,
+  ];
+  return {
+    Guid: guid,
+    Tick: ++s.currentTick,
+    Values: formatRow(values),
+    PointsValues: null,
+  };
+}
+
+function markObject(guid, name, [latitude, longitude], locked) {
   const now = toTzTime(new Date());
   const values = [
     0,
@@ -123,7 +158,7 @@ function markObject(guid, name, [latitude, longitude]) {
     null,
     0,
     0,
-    0,
+    locked ? 1 : 0,
     null,
     0,
     null,
@@ -371,10 +406,14 @@ http
           (o) => parseRow(o.Values)[0] === 5,
         );
         const live = liveRoutes().length;
+        const areas = [...s.objects.values()].filter(
+          (o) => parseRow(o.Values)[0] === 8,
+        );
+        const liveAreas = areas.filter((o) => parseRow(o.Values)[10] === 0);
         return res
           .writeHead(200, { "Content-Type": "text/html" })
           .end(
-            `<h2>User Objects Information</h2>\r\n<table class="full-size"><tr><th>Name</th><th>Live Count</th><th>Deleted Count</th></tr>\r\n<tr><td>Routes</td><td>${live}</td><td>${routes.length - live}</td></tr></table>`,
+            `<h2>User Objects Information</h2>\r\n<table class="full-size"><tr><th>Name</th><th>Live Count</th><th>Deleted Count</th></tr>\r\n<tr><td>Areas</td><td>${liveAreas.length}</td><td>${areas.length - liveAreas.length}</td></tr><tr><td>Lines</td><td>0</td><td>0</td></tr><tr><td>Routes</td><td>${live}</td><td>${routes.length - live}</td></tr></table>`,
           );
       }
       res.writeHead(200).end();
@@ -400,7 +439,20 @@ http
         s.objects.set(o.Guid, o);
         log(`local edit: route ${o.Guid} tick ${o.Tick}`);
       } else if (req.method === "POST" && req.url === "/mark") {
-        const o = markObject(b.guid ?? crypto.randomUUID(), b.name, b.position);
+        const o = markObject(
+          b.guid ?? crypto.randomUUID(),
+          b.name,
+          b.position,
+          b.locked,
+        );
+        s.objects.set(o.Guid, o);
+      } else if (req.method === "POST" && req.url === "/area") {
+        const o = areaObject(
+          b.guid ?? crypto.randomUUID(),
+          b.name,
+          b.corners,
+          b.deleted,
+        );
         s.objects.set(o.Guid, o);
       } else if (req.method === "POST" && req.url === "/navigate") {
         s.activeRoute = navigation(b, s.activeRoute.CurrentTick + 1);

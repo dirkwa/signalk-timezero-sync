@@ -6,6 +6,7 @@ import type { Delta, Plugin, ServerAPI } from "@signalk/server-api";
 import { Type, type Static } from "typebox";
 import { AnchorBridge } from "./bridge/anchor.js";
 import { CourseBridge } from "./bridge/course.js";
+import { MobBridge } from "./bridge/mob.js";
 import type { SyncedType } from "./bridge/mapping.js";
 import { ResourcesBridge } from "./bridge/resources.js";
 import { COMMAND_PORT, TimeZeroPeer } from "./peer/engine.js";
@@ -22,10 +23,16 @@ const ConfigSchema = Type.Object({
     title: "Sync waypoints (TimeZero marks)",
     default: true,
   }),
-  offerExisting: Type.Boolean({
-    title: "Send existing Signal K routes and waypoints to TimeZero",
+  syncRegions: Type.Boolean({
+    title: "Sync regions (TimeZero areas)",
     description:
-      "On start, offer TimeZero the routes and waypoints it has never had. When off, only ones created or edited while the plugin runs are sent.",
+      "A region with one outline of up to 50 corners and no holes. TimeZero holds at most 100 areas and lines together.",
+    default: true,
+  }),
+  offerExisting: Type.Boolean({
+    title: "Send existing Signal K routes, waypoints and regions to TimeZero",
+    description:
+      "On start, offer TimeZero the routes, waypoints and regions it has never had. When off, only ones created or edited while the plugin runs are sent.",
     default: true,
   }),
   maxRoutes: Type.Number({
@@ -37,6 +44,12 @@ const ConfigSchema = Type.Object({
   }),
   syncNavigation: Type.Boolean({
     title: "Sync the active route and go-to",
+    default: true,
+  }),
+  syncMob: Type.Boolean({
+    title: "Sync man overboard",
+    description:
+      "A MOB in TimeZero raises Signal K's Person Overboard alarm, and a MOB alarm raised in Signal K becomes a MOB go-to in TimeZero.",
     default: true,
   }),
   syncAnchor: Type.Boolean({
@@ -58,12 +71,14 @@ const ANCHOR_PATHS = /^navigation\.anchor\.(position|maxRadius)$/;
 // calcValues update every second from course-provider; only the course itself counts.
 const COURSE_PATHS =
   /^navigation\.course\.(nextPoint|previousPoint|activeRoute)(\.|$)/;
-const RESOURCE_PATH = /^resources\.(routes|waypoints)\.(.+)$/;
+const MOB_PATH = /^notifications\.mob(\.|$)/;
+const RESOURCE_PATH = /^resources\.(routes|waypoints|regions)\.(.+)$/;
 
 export default function (app: ServerAPI): Plugin {
   let peer: TimeZeroPeer | null = null;
   let resources: ResourcesBridge | null = null;
   let course: CourseBridge | null = null;
+  let mob: MobBridge | null = null;
   let anchor: AnchorBridge | null = null;
   let deltaHandlerRegistered = false;
 
@@ -88,6 +103,7 @@ export default function (app: ServerAPI): Plugin {
         if (res && resources)
           resources.onResourceDelta(res[1] as SyncedType, res[2]!, pv.value);
         else if (COURSE_PATHS.test(p)) course?.onCourseDelta();
+        else if (MOB_PATH.test(p)) mob?.onMobDelta(p, pv.value);
         else if (ANCHOR_PATHS.test(p)) anchor?.onAnchorDelta();
       }
     }
@@ -113,6 +129,7 @@ export default function (app: ServerAPI): Plugin {
       const types: SyncedType[] = [];
       if (config.syncRoutes !== false) types.push("routes");
       if (config.syncWaypoints !== false) types.push("waypoints");
+      if (config.syncRegions !== false) types.push("regions");
       if (types.length)
         resources = new ResourcesBridge(app, peer, {
           types,
@@ -121,6 +138,7 @@ export default function (app: ServerAPI): Plugin {
           maxRoutes: config.maxRoutes ?? 200,
         });
       if (config.syncNavigation !== false) course = new CourseBridge(app, peer);
+      if (config.syncMob !== false) mob = new MobBridge(app, peer);
       if (config.syncAnchor !== false) anchor = new AnchorBridge(app, peer);
 
       if (!deltaHandlerRegistered) {
@@ -159,6 +177,7 @@ export default function (app: ServerAPI): Plugin {
       peer = null;
       resources = null;
       course = null;
+      mob = null;
       anchor = null;
     },
   };

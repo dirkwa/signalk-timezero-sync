@@ -8,13 +8,15 @@ installations sync with each other:
 | ------------------------------- | ------------------- | ------------------- |
 | Routes                          | ✓                   | ✓                   |
 | Marks / waypoints               | ✓                   | ✓                   |
+| Areas / regions                 | ✓                   | ✓                   |
 | Go-to                           | ✓                   | ✓                   |
 | Active route and its next point | ✓                   | ✓                   |
 | Cancel navigation               | ✓                   | ✓                   |
+| Man overboard                   | ✓                   | ✓                   |
 | Anchor watch (circle)           | ✓                   | ✓                   |
 
-On the Signal K side it uses the standard Resources API, Course API and anchor
-paths, so Freeboard-SK and every other Signal K chart app sees TimeZero's routes
+On the Signal K side it uses the standard Resources API, Course API,
+Notifications API and anchor paths, so Freeboard-SK and every other Signal K chart app sees TimeZero's routes
 and course, and their changes reach TimeZero.
 
 ## Requirements
@@ -46,6 +48,14 @@ TimeZero" setting. TimeZero stays the sync master.
   Signal K, and one deleted in Signal K is deleted in TimeZero and on every
   device TimeZero syncs with. Clearing out routes in TimeZero clears them in
   Signal K too, including Signal K routes TimeZero had just received.
+- **Locked objects stay locked.** TimeZero protects a locked route, mark or
+  area from being moved or deleted. Signal K has no lock, so a change made to
+  one in a Signal K app is undone there and not sent; the plugin's status says
+  so. Unlock it in TimeZero first.
+- **Man overboard**: a MOB in TimeZero raises Signal K's Person Overboard alarm
+  (Notifications API), and TimeZero ending it clears that alarm. A MOB alarm
+  raised in Signal K, for example with Freeboard's MOB button, becomes a MOB
+  go-to in TimeZero at the alarm's position.
 - **Navigation**: TimeZero's go-to and active route map to the Signal K Course
   API both ways. A route has to exist on both sides before it can be activated,
   so activating a new Signal K route waits until TimeZero has collected it.
@@ -76,8 +86,16 @@ nor lets its older state overwrite a newer one.
   go-to left over from an earlier passage must not become TimeZero's course.
   Anchor changes in the first minute after start are not sent either, while an
   anchor plugin may still be restoring its anchor.
-- TimeZero marks and routes in user layers are left alone.
-- Areas, circles, lines, events and tracks are not synced.
+- **Areas** sync as Signal K regions with one outline of 3 to 50 corners and
+  no holes; TimeZero holds at most 100 areas and lines together, and a new
+  region is only sent while there is room. Regions with holes or several
+  polygons are not sent.
+- **MOB**: clearing the MOB alarm in Signal K does not end the MOB navigation
+  in TimeZero; end it at the plotter. A MOB that TimeZero started while Signal K
+  was off, or before a Signal K restart, does not raise the alarm in Signal K.
+  TimeZero's MOB event marks are not synced.
+- TimeZero marks, routes and areas in user layers are left alone.
+- Circles, lines, events and tracks are not synced.
 - TimeZero has no reverse flag, so a route followed in reverse in Signal K is not
   sent to TimeZero.
 - TimeZero's anchor watch is a circle; polygon and sector anchor zones are not

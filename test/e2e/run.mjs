@@ -87,6 +87,15 @@ const tz = (p = "/state", body) =>
 const course = () =>
   get(`${API}/signalk/v2/api/vessels/self/navigation/course`);
 const routes = () => get(`${API}/signalk/v2/api/resources/routes`);
+const waypoints = () => get(`${API}/signalk/v2/api/resources/waypoints`);
+const regions = () => get(`${API}/signalk/v2/api/resources/regions`);
+// Whether Signal K has a MOB alarm in an emergency state.
+const mobAlarm = async () => {
+  const res = await fetch(
+    `${API}/signalk/v1/api/vessels/self/notifications/mob`,
+  );
+  return res.ok && (await res.text()).includes('"state":"emergency"');
+};
 const anchorPosition = async () =>
   (
     await get(
@@ -240,6 +249,8 @@ function feedPosition() {
 
 const ROUTE_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const MARK_A = "aaaaaaaa-0000-4000-8000-000000000002";
+const AREA_A = "aaaaaaaa-0000-4000-8000-000000000003";
+const MARK_LOCKED = "aaaaaaaa-0000-4000-8000-000000000004";
 
 function startFakeTimeZero(env, mounts = []) {
   podman(
@@ -451,6 +462,118 @@ async function defaultScenario() {
     );
   }
 
+  console.log("== areas, both ways");
+  await tz("/area", {
+    guid: AREA_A,
+    name: "TZ Area 1",
+    corners: [
+      [-17.8, 177.15],
+      [-17.8, 177.16],
+      [-17.81, 177.16],
+    ],
+  });
+  await waitFor(
+    "TimeZero's area appears as a Signal K region",
+    async () => (await regions())[AREA_A]?.name === "TZ Area 1",
+  );
+  const createdRegion = await send(
+    "POST",
+    `${API}/signalk/v2/api/resources/regions`,
+    {
+      name: "SK Region",
+      feature: {
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [177.2, -17.7],
+              [177.21, -17.7],
+              [177.21, -17.71],
+              [177.2, -17.7],
+            ],
+          ],
+        },
+        properties: {},
+      },
+    },
+  );
+  const regionB = createdRegion.json?.id;
+  await waitFor(
+    "a Signal K region reaches TimeZero as an area",
+    async () =>
+      (await tz()).objects.some(
+        (o) =>
+          o.guid === regionB &&
+          o.type === 8 &&
+          o.name === "SK Region" &&
+          o.deleted === 0,
+      ),
+    60000,
+  );
+  await send("DELETE", `${API}/signalk/v2/api/resources/regions/${regionB}`);
+  await waitFor(
+    "the region's deletion reaches TimeZero",
+    async () =>
+      (await tz()).objects.some((o) => o.guid === regionB && o.deleted === 1),
+    60000,
+  );
+
+  console.log("== a mark locked in TimeZero");
+  await tz("/mark", {
+    guid: MARK_LOCKED,
+    name: "TZ Locked",
+    position: [-17.79, 177.15],
+    locked: true,
+  });
+  await waitFor(
+    "the locked mark appears in Signal K",
+    async () => (await waypoints())[MARK_LOCKED]?.name === "TZ Locked",
+  );
+  await send(
+    "DELETE",
+    `${API}/signalk/v2/api/resources/waypoints/${MARK_LOCKED}`,
+  );
+  await sleep(3000);
+  await waitFor(
+    "deleting it in Signal K puts it back",
+    async () => (await waypoints())[MARK_LOCKED]?.name === "TZ Locked",
+  );
+  await sleep(15000);
+  const lockedState = await tz();
+  check(
+    "TimeZero keeps the locked mark",
+    lockedState.objects.some(
+      (o) => o.guid === MARK_LOCKED && o.deleted === 0,
+    ) && !lockedState.log.some((l) => l.includes(`pulled ${MARK_LOCKED}`)),
+  );
+
+  console.log("== man overboard, both ways");
+  await tz("/navigate", {
+    kind: "goto",
+    lat: -17.805,
+    lon: 177.155,
+    mob: true,
+  });
+  await waitFor("a MOB in TimeZero raises Signal K's MOB alarm", mobAlarm);
+  await tz("/navigate", { kind: "none" });
+  await waitFor(
+    "TimeZero ending its MOB clears the alarm",
+    async () => !(await mobAlarm()),
+  );
+  await send("POST", `${API}/signalk/v2/api/notifications/mob`, {
+    message: "e2e MOB",
+  });
+  await waitFor(
+    "a MOB raised in Signal K is a MOB go-to in TimeZero",
+    async () => {
+      const a = (await tz()).activeRoute;
+      return (
+        a.IsManOverBoard === 1 && a.TemporaryDestinationPosition !== "NULL"
+      );
+    },
+  );
+
   console.log("== Signal K -> TimeZero: a deletion");
   await send("DELETE", `${API}/signalk/v2/api/resources/routes/${routeB}`);
   await waitFor(
@@ -604,6 +727,11 @@ async function firstContact(seed) {
         .length >=
       liveNoLayer("0") + 1,
     180000,
+  );
+  await waitFor(
+    `all of TimeZero's ${liveNoLayer("8")} areas are regions in Signal K`,
+    async () => Object.keys(await regions()).length >= liveNoLayer("8"),
+    60000,
   );
   await waitFor(
     "TimeZero pulls Signal K's own waypoint",

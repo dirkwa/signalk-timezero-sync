@@ -10,11 +10,13 @@ const ROUTE_HREF = /^\/resources\/routes\/([0-9a-fA-F-]{36})$/;
 const CHANGE_SETTLE_MS = 1000;
 
 // Origin positions differ between the two sides (each restarts the leg at its
-// own vessel fix), so only what is navigated to identifies a course.
+// own vessel fix), so only what is navigated to identifies a course. The MOB
+// flag does not count: a Signal K course has none, and a Signal K go-to to the
+// MOB position must not turn TimeZero's MOB into a plain go-to.
 export function sameNavigation(a: Navigation, b: Navigation): boolean {
   if (a.kind !== b.kind) return false;
   if (a.kind === "goto" && b.kind === "goto")
-    return samePosition(a.destination, b.destination) && a.mob === b.mob;
+    return samePosition(a.destination, b.destination);
   if (a.kind === "route" && b.kind === "route")
     return (
       a.routeGuid.toLowerCase() === b.routeGuid.toLowerCase() &&

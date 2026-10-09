@@ -1,8 +1,8 @@
-// Mapping between TimeZero user objects and Signal K route and waypoint
-// resources. The TimeZero GUID is used as the Signal K resource id, so an
+// Mapping between TimeZero user objects and Signal K route, waypoint and
+// region resources. The TimeZero GUID is used as the Signal K resource id, so an
 // object is the same thing on both sides without a lookup table.
 
-import type { Route, Waypoint } from "@signalk/server-api";
+import type { Region, Route, Waypoint } from "@signalk/server-api";
 import {
   decodePoint,
   decodePolyline,
@@ -24,11 +24,17 @@ import {
   type UserObject,
 } from "../protocol/userObject.js";
 
-export type SyncedType = "routes" | "waypoints";
+export type SyncedType = "routes" | "waypoints" | "regions";
+export type SkResource = Route | Waypoint | Region;
 
 // The default colour TimeZero gave routes created on the chart in testing.
 const DEFAULT_ROUTE_COLOR = 3;
 const DEFAULT_MARK_COLOR = 1;
+const DEFAULT_AREA_COLOR = 9;
+// Value3 on every area TimeZero created on the boat; its meaning is unknown.
+const AREA_VALUE3 = "40";
+// TimeZero's synced layer takes areas of at most 50 corners.
+export const MAX_AREA_CORNERS = 50;
 // RoutingFlags on every route point after the first, as TimeZero writes them.
 const ROUTE_POINT_FLAGS = 4;
 
@@ -36,11 +42,16 @@ export function typeOf(obj: UserObject): SyncedType | null {
   const t = num(obj.values[COLUMN.objectType]);
   if (t === OBJECT_TYPE.route) return "routes";
   if (t === OBJECT_TYPE.mark) return "waypoints";
+  if (t === OBJECT_TYPE.area) return "regions";
   return null;
 }
 
 export const isDeleted = (obj: UserObject): boolean =>
   num(obj.values[COLUMN.deleted]) === 1;
+
+// Locked in TimeZero: it can be neither moved nor deleted until unlocked there.
+export const isLocked = (obj: UserObject): boolean =>
+  num(obj.values[COLUMN.locked]) === 1;
 
 // Objects in a TimeZero user layer belong to that layer's own sync; leave them.
 export const inUserLayer = (obj: UserObject): boolean =>
@@ -98,6 +109,62 @@ export function toSkWaypoint(obj: UserObject): Waypoint | null {
   return waypoint;
 }
 
+// TimeZero stores an area as its corners; GeoJSON closes the ring by repeating
+// the first one.
+export function toSkRegion(obj: UserObject): Region | null {
+  const corners = decodePolyline(blob(obj.values[COLUMN.geometry]));
+  if (!corners || corners.length < 3) return null;
+  const ring = corners.map(lonLat);
+  ring.push(ring[0]!);
+  const region: Region = {
+    feature: {
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: [ring] },
+      properties: {},
+    },
+  };
+  const name = text(obj.values[COLUMN.name]);
+  const description = text(obj.values[COLUMN.comment]);
+  if (name) region.name = name;
+  if (description) region.description = description;
+  return region;
+}
+
+// The corners of a region TimeZero can hold: one outline without holes. null
+// for anything else (holes, several polygons, too few corners).
+export function regionCorners(region: Region): LatLon[] | null {
+  const geometry = region.feature?.geometry;
+  let rings: (number | undefined)[][][] | undefined;
+  if (geometry?.type === "Polygon") rings = geometry.coordinates;
+  else if (
+    geometry?.type === "MultiPolygon" &&
+    geometry.coordinates.length === 1
+  )
+    rings = geometry.coordinates[0];
+  if (!rings || rings.length !== 1) return null;
+  const ring = rings[0]!.map(latLon);
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (
+    first &&
+    last &&
+    ring.length > 1 &&
+    first.latitude === last.latitude &&
+    first.longitude === last.longitude
+  )
+    ring.pop();
+  return ring.length >= 3 ? ring : null;
+}
+
+export function toSkResource(
+  type: SyncedType,
+  obj: UserObject,
+): SkResource | null {
+  if (type === "routes") return toSkRoute(obj);
+  if (type === "regions") return toSkRegion(obj);
+  return toSkWaypoint(obj);
+}
+
 // Start from what TimeZero last sent for this object, so its own fields
 // (icon, colour, chart level, ...) survive an edit made in Signal K.
 function baseRow(
@@ -113,7 +180,10 @@ function baseRow(
     row[COLUMN.color] =
       objectType === OBJECT_TYPE.route
         ? DEFAULT_ROUTE_COLOR
-        : DEFAULT_MARK_COLOR;
+        : objectType === OBJECT_TYPE.area
+          ? DEFAULT_AREA_COLOR
+          : DEFAULT_MARK_COLOR;
+    if (objectType === OBJECT_TYPE.area) row[COLUMN.value3] = AREA_VALUE3;
     row[COLUMN.chartLevel] = 0;
     row[COLUMN.locked] = 0;
     row[COLUMN.shared] = 0;
@@ -175,6 +245,21 @@ export function fromSkWaypoint(
   return { guid: id, values: row, points: null };
 }
 
+export function fromSkRegion(
+  id: string,
+  region: Region,
+  previous: UserObject | undefined,
+  now: Date,
+): Omit<UserObject, "tick"> | null {
+  const corners = regionCorners(region);
+  if (!corners || corners.length > MAX_AREA_CORNERS) return null;
+  const row = baseRow(previous, OBJECT_TYPE.area, now);
+  row[COLUMN.geometry] = encodePolyline(corners);
+  row[COLUMN.name] = region.name ?? "";
+  row[COLUMN.comment] = region.description ?? null;
+  return { guid: id, values: row, points: null };
+}
+
 export function tombstone(
   previous: UserObject,
   now: Date,
@@ -188,10 +273,7 @@ export function tombstone(
 // What a Signal K resource looks like to TimeZero. Comparing these tells a
 // real change from the echo of our own write, regardless of key order or
 // sub-centimetre float noise.
-export function fingerprint(
-  type: SyncedType,
-  resource: Route | Waypoint,
-): string {
+export function fingerprint(type: SyncedType, resource: SkResource): string {
   if (type === "routes") {
     const r = resource as Route;
     const coords = r.feature?.geometry?.coordinates ?? [];
@@ -204,6 +286,15 @@ export function fingerprint(
       r.description ?? "",
       encodePolyline(coords.map(latLon)).toString("hex"),
       coords.map((_, i) => meta?.[i]?.name ?? ""),
+    ]);
+  }
+  if (type === "regions") {
+    const r = resource as Region;
+    const corners = regionCorners(r);
+    return JSON.stringify([
+      r.name ?? "",
+      r.description ?? "",
+      corners ? encodePolyline(corners).toString("hex") : "",
     ]);
   }
   const w = resource as Waypoint;
