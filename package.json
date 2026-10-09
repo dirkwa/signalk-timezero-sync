@@ -1,6 +1,6 @@
 {
   "name": "signalk-timezero-sync",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Sync routes, waypoints, the active route and the anchor watch between Signal K and TimeZero over TimeZero's own LAN sync.",
   "type": "module",
   "main": "dist/index.js",
