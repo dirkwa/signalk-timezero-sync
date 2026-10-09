@@ -42,6 +42,10 @@ TimeZero" setting. TimeZero stays the sync master.
   TimeZero, which collects it in a sync round. The plugin starts one by
   briefly claiming the sync master role in a single beacon, which makes
   TimeZero sync with it; the next beacon hands the role straight back.
+- **Deletions go both ways.** A route or mark deleted in TimeZero is deleted in
+  Signal K, and one deleted in Signal K is deleted in TimeZero and on every
+  device TimeZero syncs with. Clearing out routes in TimeZero clears them in
+  Signal K too, including Signal K routes TimeZero had just received.
 - **Navigation**: TimeZero's go-to and active route map to the Signal K Course
   API both ways. A route has to exist on both sides before it can be activated,
   so activating a new Signal K route waits until TimeZero has collected it.
