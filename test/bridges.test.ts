@@ -214,7 +214,7 @@ describe("resources bridge", () => {
 
   test("writes a TimeZero route into Signal K and does not echo it back", async () => {
     const { bridge, store, offers } = setup();
-    await bridge.fromTimeZero([tzRoute()]);
+    await bridge.fromTimeZero([tzRoute()], 33430);
     expect((store.routes![ID] as Route).name).toBe("SK test route");
     await vi.runAllTimersAsync();
     expect(offers).toEqual([]);
@@ -222,7 +222,7 @@ describe("resources bridge", () => {
 
   test("offers a route edited in Signal K", async () => {
     const { bridge, offers } = setup();
-    await bridge.fromTimeZero([tzRoute()]);
+    await bridge.fromTimeZero([tzRoute()], 33430);
     await vi.runAllTimersAsync();
     bridge.onResourceDelta("routes", ID, {
       ...route,
@@ -234,7 +234,7 @@ describe("resources bridge", () => {
 
   test("a route deleted in TimeZero is deleted in Signal K, and only if synced", async () => {
     const { bridge, store } = setup();
-    await bridge.fromTimeZero([tzRoute()]);
+    await bridge.fromTimeZero([tzRoute()], 33430);
     const deleted = parseUserObject({
       Guid: ID,
       Tick: 33433,
@@ -243,17 +243,18 @@ describe("resources bridge", () => {
       ),
       PointsValues: null,
     });
-    await bridge.fromTimeZero([deleted]);
+    await bridge.fromTimeZero([deleted], 33433);
     expect(store.routes![ID]).toBeUndefined();
     // A TimeZero tombstone for something Signal K never had is ignored.
-    await bridge.fromTimeZero([
-      { ...deleted, guid: "11111111-2222-3333-4444-555555555555" },
-    ]);
+    await bridge.fromTimeZero(
+      [{ ...deleted, guid: "11111111-2222-3333-4444-555555555555" }],
+      33433,
+    );
   });
 
   test("never takes a known object missing from Signal K for a deletion", async () => {
     const { bridge, store, offers } = setup();
-    await bridge.fromTimeZero([tzRoute()]);
+    await bridge.fromTimeZero([tzRoute()], 33430);
     await vi.runAllTimersAsync();
     delete store.routes![ID]; // e.g. not written yet, or another provider
     await bridge.reconcile();
@@ -280,7 +281,7 @@ describe("resources bridge", () => {
         33000 + i,
       ),
     );
-    const importing = bridge.fromTimeZero(objects);
+    const importing = bridge.fromTimeZero(objects, 33019);
     const checking = bridge.reconcile();
     await vi.runAllTimersAsync();
     await Promise.all([importing, checking]);
@@ -331,7 +332,7 @@ describe("resources bridge", () => {
 
     test("always sends edits and deletions of routes TimeZero has", async () => {
       const { bridge, offers } = setup(true, 200);
-      await bridge.fromTimeZero([tzRoute()]);
+      await bridge.fromTimeZero([tzRoute()], 33430);
       await vi.runAllTimersAsync();
       bridge.onResourceDelta("routes", ID, { ...route, name: "Edited" });
       await vi.runAllTimersAsync();
@@ -434,6 +435,48 @@ describe("resources bridge", () => {
 
   test("on start, leaves them alone when offering existing ones is off", async () => {
     const { bridge, store, offers } = setup(false);
+    store.routes![ID] = route;
+    await bridge.reconcile();
+    expect(offers).toEqual([]);
+  });
+
+  test("with a resource state behind the peer's, reads TimeZero again and offers nothing until it has", async () => {
+    // The peer has synced up to 33500, but the record of which Signal K
+    // resources are TimeZero's is gone. TimeZero sends nothing on rejoin.
+    fs.writeFileSync(
+      path.join(dir, "peer.json"),
+      JSON.stringify({
+        uuid: "b0b0afa6-0000-4000-8000-000000000000",
+        tzTableTick: 33500,
+      }),
+    );
+    const { peer, bridge, store, offers } = setup();
+    expect((peer as unknown as { readFrom: number | null }).readFrom).toBe(0);
+    const OWN = "bbbbbbbb-0000-4000-8000-000000000003";
+    store.routes![ID] = route; // Signal K's copy of TimeZero's route
+    store.waypoints![OWN] = waypoint; // Signal K's own
+    await bridge.reconcile();
+    bridge.onResourceDelta("routes", ID, { ...route, name: "Edited" });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(offers).toEqual([]);
+    // The full read brings TimeZero's route; then the peer is caught up.
+    peer.emit("objects", [tzRoute()], 33500);
+    peer.emit("caughtUp");
+    await vi.advanceTimersByTimeAsync(3000);
+    // TimeZero's copy is written over the edit made during the read, so the
+    // two sides agree; only Signal K's own waypoint goes.
+    expect(offers).toEqual([OWN]);
+    expect((store.routes![ID] as Route).name).toBe("SK test route");
+    const saved = JSON.parse(
+      fs.readFileSync(path.join(dir, "resources.json"), "utf8"),
+    );
+    expect(saved.tableTick).toBe(33500);
+  });
+
+  test("on start, never offers a resource TimeZero has had, even one deleted there", async () => {
+    const { bridge, store, offers } = setup();
+    const deleted = { ...tzRoute(), values: tombstone(tzRoute(), NOW).values };
+    await bridge.fromTimeZero([deleted], 33433);
     store.routes![ID] = route;
     await bridge.reconcile();
     expect(offers).toEqual([]);

@@ -53,6 +53,12 @@ const CHANGE_SETTLE_MS = 1000;
 
 interface SavedState {
   known: Record<string, Known>;
+  // How far TimeZero's table is reflected in `known`. Behind the peer's own
+  // tick (a lost or older state file) `known` cannot be trusted to tell
+  // TimeZero's objects from new Signal K ones.
+  tableTick: number;
+  // Every route and mark guid TimeZero has sent, deleted ones included.
+  seen: string[];
   // New routes offered but not yet pulled: each holds one of TimeZero's
   // places until it is pulled, across restarts too.
   awaitingNew: string[];
@@ -62,6 +68,10 @@ interface SavedState {
 
 export class ResourcesBridge {
   private known: Record<string, Known>;
+  private tableTick: number;
+  private seen: Set<string>;
+  // Whether `known` covers TimeZero's table up to `tableTick`.
+  private inStep: boolean;
   private awaitingNew: Set<string>;
   private held: Set<string>;
   private pending = new Map<string, { type: SyncedType; value: unknown }>();
@@ -78,14 +88,34 @@ export class ResourcesBridge {
   ) {
     const saved = loadState(opts.stateFile);
     this.known = saved.known;
+    this.tableTick = saved.tableTick;
+    this.seen = new Set(saved.seen);
+    this.inStep = this.tableTick >= peer.tableTick;
+    if (!this.inStep) {
+      app.debug(
+        `resource state is at tick ${this.tableTick}, the peer at ${peer.tableTick}: reading TimeZero's table again`,
+      );
+      peer.rereadTable();
+    }
     this.awaitingNew = new Set(
       saved.awaitingNew.filter((g) => peer.isPending(g)),
     );
     this.held = new Set(saved.held);
-    peer.on("objects", (objects) => void this.fromTimeZero(objects));
+    peer.on(
+      "objects",
+      (objects, tick) => void this.fromTimeZero(objects, tick),
+    );
     // Only once all of TimeZero's objects are here can a Signal K resource be
     // told apart from one TimeZero already has.
-    peer.on("caughtUp", () => void this.reconcile());
+    peer.on("caughtUp", () => {
+      const tick = peer.tableTick;
+      void this.enqueue(async () => {
+        this.inStep = true;
+        this.tableTick = Math.max(this.tableTick, tick);
+        this.save();
+        await this.reconcileNow();
+      });
+    });
     peer.on("pulled", (guids) => {
       guids.forEach((g) => this.awaitingNew.delete(g));
       this.retryHeld();
@@ -113,15 +143,19 @@ export class ResourcesBridge {
 
   // ---- TimeZero -> Signal K ----------------------------------------------
 
-  fromTimeZero(objects: UserObject[]): Promise<void> {
-    return this.enqueue(() => this.importObjects(objects));
+  fromTimeZero(objects: UserObject[], tick: number): Promise<void> {
+    return this.enqueue(() => this.importObjects(objects, tick));
   }
 
-  private async importObjects(objects: UserObject[]): Promise<void> {
+  private async importObjects(
+    objects: UserObject[],
+    tick: number,
+  ): Promise<void> {
     for (const obj of objects) {
       const type = typeOf(obj);
       if (!type || !this.opts.types.includes(type) || inUserLayer(obj))
         continue;
+      this.seen.add(obj.guid);
       const known = this.known[obj.guid];
       try {
         if (isDeleted(obj)) {
@@ -155,6 +189,8 @@ export class ResourcesBridge {
         );
       }
     }
+    // During a full read the pages are not yet the whole table.
+    if (this.inStep) this.tableTick = Math.max(this.tableTick, tick);
     this.save();
     if (objects.some(isDeleted)) this.retryHeld();
   }
@@ -173,6 +209,12 @@ export class ResourcesBridge {
 
   private flush(): void {
     this.flushTimer = null;
+    // Until TimeZero's table is read, a Signal K change cannot be told from
+    // the echo of an object still being imported.
+    if (!this.inStep) {
+      this.flushTimer = setTimeout(() => this.flush(), CHANGE_SETTLE_MS);
+      return;
+    }
     const changes = [...this.pending];
     this.pending.clear();
     void this.enqueue(async () => {
@@ -276,6 +318,7 @@ export class ResourcesBridge {
   }
 
   private async reconcileNow(): Promise<void> {
+    if (!this.inStep) return;
     const now = new Date();
     const candidates: Candidate[] = [];
     for (const type of this.opts.types) {
@@ -289,6 +332,10 @@ export class ResourcesBridge {
       for (const [id, resource] of Object.entries(resources)) {
         if (!this.known[id] && !this.opts.offerExisting && !this.held.has(id))
           continue;
+        // An unknown resource TimeZero has had is not new: it is TimeZero's
+        // object, perhaps deleted there since. Offering it would overwrite or
+        // bring back TimeZero's copy.
+        if (!this.known[id] && this.seen.has(id)) continue;
         const c = this.candidate(type, id, resource as Route | Waypoint, now);
         if (c) candidates.push(c);
       }
@@ -304,6 +351,8 @@ export class ResourcesBridge {
       const tmp = `${this.opts.stateFile}.tmp`;
       const state: SavedState = {
         known: this.known,
+        tableTick: this.tableTick,
+        seen: [...this.seen],
         awaitingNew: [...this.awaitingNew],
         held: [...this.held],
       };
@@ -320,10 +369,12 @@ function loadState(file: string): SavedState {
     const s = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<SavedState>;
     return {
       known: s.known ?? {},
+      tableTick: s.tableTick ?? 0,
+      seen: s.seen ?? [],
       awaitingNew: s.awaitingNew ?? [],
       held: s.held ?? [],
     };
   } catch {
-    return { known: {}, awaitingNew: [], held: [] };
+    return { known: {}, tableTick: 0, seen: [], awaitingNew: [], held: [] };
   }
 }

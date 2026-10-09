@@ -58,6 +58,12 @@ start-up safe` commit):
   hundreds of TimeZero objects are still being written; absence means nothing.
 - Never compare Signal K against itself while an import is running: imports,
   offers and the start-up check share one queue.
+- Never trust the record of which resources are TimeZero's when it is behind
+  the peer's table tick (a lost or older `resources.json`). TimeZero sends a
+  returning peer only what is newer than its record of it, so Signal K's
+  copies of its objects would look new; the peer reads the whole table again
+  first (`TimeZeroPeer.rereadTable`). An unknown resource whose guid TimeZero
+  has ever sent is never offered as new.
 - Never send state that predates the plugin. The Course API restores its saved
   course after plugins start; a new course counts only if its `startTime` is
   after the plugin started. Anchor changes in the first minute are ignored.

@@ -278,6 +278,89 @@ describe("reading TimeZero's routes and marks", () => {
       close();
     }
   });
+
+  test("a requested full read covers the whole table, and only then is it caught up", async () => {
+    const peer = makePeer();
+    (peer as unknown as { state: { tzTableTick: number } }).state.tzTableTick =
+      33500;
+    const received: string[] = [];
+    peer.on("objects", (o) => received.push(...o.map((x) => x.guid)));
+    let caughtUp = 0;
+    peer.on("caughtUp", () => caughtUp++);
+    const obj = (guid: string, tick: number) => ({
+      Guid: guid,
+      Tick: tick,
+      Values: formatRow(routeRow(guid)),
+      PointsValues: null,
+    });
+    const pages: Record<string, UserObjectTableDto> = {
+      "0": {
+        CurrentTick: 33500,
+        SyncTicks: "",
+        RemainingToSync: 1,
+        Objects: [obj("a", 100)],
+        Layers: [],
+      },
+      "100": {
+        CurrentTick: 33500,
+        SyncTicks: "",
+        RemainingToSync: 0,
+        Objects: [obj("b", 33400)],
+        Layers: [],
+      },
+    };
+    const calls = recordRequests(peer, (p) => {
+      if (p.includes("GetLock")) return { status: 202, body: "" };
+      const min = /MinTick=(\d+)/.exec(p)?.[1];
+      return min
+        ? { status: 200, body: JSON.stringify(pages[min]) }
+        : { status: 200, body: "" };
+    });
+    peer.rereadTable();
+    // TimeZero's beacon shows nothing newer than our tick.
+    peer.onBeacon(tzBeacon({ table: 33500 }), TZ_ADDRESS);
+    expect(caughtUp).toBe(0);
+    await flush();
+    expect(
+      calls.filter((c) => c.includes("UserObject")).map((c) => c.split(" ")[1]),
+    ).toHaveLength(2);
+    expect(received).toEqual(["a", "b"]);
+    expect(peer.tableTick).toBe(33500);
+    peer.onBeacon(tzBeacon({ table: 33500 }), TZ_ADDRESS);
+    expect(caughtUp).toBe(1);
+  });
+
+  test("a full read does not take TimeZero's older copy of an offered edit as pulled", async () => {
+    const peer = makePeer();
+    peer.offer([{ guid: ROUTE_GUID, values: routeRow("New"), points: null }]);
+    recordRequests(peer, (p) =>
+      p.includes("GetLock")
+        ? { status: 202, body: "" }
+        : p.includes("UserObject")
+          ? {
+              status: 200,
+              body: JSON.stringify({
+                CurrentTick: 33500,
+                SyncTicks: "",
+                RemainingToSync: 0,
+                Objects: [
+                  {
+                    Guid: ROUTE_GUID,
+                    Tick: 33000,
+                    Values: formatRow(routeRow("Old")),
+                    PointsValues: null,
+                  },
+                ],
+                Layers: [],
+              }),
+            }
+          : { status: 200, body: "" },
+    );
+    peer.rereadTable();
+    peer.onBeacon(tzBeacon({ table: 33500 }), TZ_ADDRESS);
+    await flush();
+    expect(peer.isPending(ROUTE_GUID)).toBe(true);
+  });
 });
 
 describe("active route", () => {

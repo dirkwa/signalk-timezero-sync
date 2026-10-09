@@ -68,7 +68,8 @@ export interface PeerOptions {
 }
 
 export interface PeerEvents {
-  objects: [UserObject[]];
+  // Objects from TimeZero, and how far its table has been read with them.
+  objects: [UserObject[], number];
   navigation: [Navigation];
   anchor: [Anchor | null];
   // Objects TimeZero pulled from us, by guid.
@@ -97,6 +98,8 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
   private busy = false;
   private started = false;
   private caughtUpThisSession = false;
+  // Where a requested full read of TimeZero's table has got to.
+  private readFrom: number | null = null;
 
   constructor(private readonly opts: PeerOptions) {
     super();
@@ -113,6 +116,19 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
 
   get anchor(): Anchor | null {
     return this.state.anchor;
+  }
+
+  // How far TimeZero's routes and marks have been received.
+  get tableTick(): number {
+    return this.state.tzTableTick;
+  }
+
+  // Read TimeZero's whole table again, for a receiver that lost track of
+  // which objects it has (its own record is behind ours). TimeZero cannot be
+  // asked for that: it sends a returning peer only what is newer than its
+  // record of the peer. Until the read is done there is no caughtUp.
+  rereadTable(): void {
+    this.readFrom = 0;
   }
 
   get hasSynced(): { route: boolean; anchor: boolean } {
@@ -301,7 +317,10 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
       void this.pushAnchor(address);
     // TimeZero announces edits to routes and marks in its beacon but only
     // sends them when a peer joins, so read them ourselves.
-    else if (beacon.tableTick > this.state.tzTableTick)
+    else if (
+      this.readFrom !== null ||
+      beacon.tableTick > this.state.tzTableTick
+    )
       void this.pullObjects(address);
     else if (!this.caughtUpThisSession && !this.busy) {
       this.caughtUpThisSession = true;
@@ -406,18 +425,26 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
   // A read only: unlike a pushed table, it changes nothing on TimeZero.
   private pullObjects(address: string): Promise<void> {
     return this.withLock(address, async () => {
+      const fullRead = this.readFrom !== null;
+      let cursor = this.readFrom ?? this.state.tzTableTick;
       for (let page = 0; page < MAX_TABLE_PAGES; page++) {
         const res = await this.request(
           address,
           "GET",
-          `${API}/UserObject?MinTick=${this.state.tzTableTick}&Limit=${TABLE_PAGE_SIZE}&CanUseLayers=False`,
+          `${API}/UserObject?MinTick=${cursor}&Limit=${TABLE_PAGE_SIZE}&CanUseLayers=False`,
         );
         if (res.status !== 200) return;
         const table = JSON.parse(res.body) as UserObjectTableDto;
-        const before = this.state.tzTableTick;
-        this.acceptObjects(table);
-        if (table.RemainingToSync <= 0 || this.state.tzTableTick <= before)
+        this.acceptObjects(table, fullRead);
+        const last = Math.max(cursor, ...table.Objects.map((o) => o.Tick));
+        if (table.RemainingToSync <= 0) {
+          if (fullRead) this.readFrom = null;
           return;
+        }
+        if (last <= cursor) return;
+        cursor = last;
+        // An interrupted full read carries on from here at the next beacon.
+        if (fullRead) this.readFrom = cursor;
       }
     });
   }
@@ -479,7 +506,7 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     this.emit("anchor", anchor);
   }
 
-  private acceptObjects(table: UserObjectTableDto): void {
+  private acceptObjects(table: UserObjectTableDto, fullRead = false): void {
     // A table is master data: continue from the master's tick once it is all
     // here, and from the last object received while pages are outstanding.
     const lastTick = Math.max(0, ...table.Objects.map((o) => o.Tick));
@@ -491,8 +518,10 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     const pulled: string[] = [];
     for (const dto of table.Objects) {
       // TimeZero sends an object it pulled from us straight back under its
-      // own tick, in the same round: that is the confirmation it has it.
-      if (this.state.offered[dto.Guid]) {
+      // own tick, in the same round: that is the confirmation it has it. A
+      // full read also returns TimeZero's older copy of an object we offer
+      // an edit of, which confirms nothing.
+      if (!fullRead && this.state.offered[dto.Guid]) {
         delete this.state.offered[dto.Guid];
         pulled.push(dto.Guid);
       }
@@ -504,7 +533,8 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     }
     this.save();
     if (pulled.length) this.emit("pulled", pulled);
-    if (objects.length) this.emit("objects", objects);
+    // Even with no objects: the receiver tracks how far the table is read.
+    this.emit("objects", objects, this.state.tzTableTick);
   }
 
   // Offered to TimeZero but not yet confirmed as pulled.
