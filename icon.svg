@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>TimeZero Sync</title>
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#0E7490"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#sea)" stroke-width="16" stroke-linecap="round">
+    <path d="M31.9 100.4A100 100 0 0 1 204.6 63.7"/>
+    <path d="M224.1 155.6A100 100 0 0 1 51.4 192.3"/>
+  </g>
+  <g fill="url(#sea)" stroke="url(#sea)" stroke-width="6" stroke-linejoin="round">
+    <path d="M223.1 97.1L217.2 47.7L187.5 74.5Z"/>
+    <path d="M32.9 158.9L38.8 208.3L68.5 181.5Z"/>
+  </g>
+  <g fill="#2563EB">
+    <path d="M64 84H124V104H104V172H84V104H64Z"/>
+    <path d="M132 84H192V102L156 152H192V172H130V154L166 104H132Z"/>
+  </g>
+</svg>

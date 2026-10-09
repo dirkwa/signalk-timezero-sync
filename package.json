@@ -7,7 +7,8 @@
   "types": "dist/index.d.ts",
   "exports": "./dist/index.js",
   "files": [
-    "dist"
+    "dist",
+    "icon.svg"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -38,6 +39,7 @@
   },
   "signalk-plugin-enabled-by-default": true,
   "signalk": {
+    "appIcon": "./icon.svg",
     "displayName": "TimeZero Sync",
     "recommends": [
       "@signalk/resources-provider",
