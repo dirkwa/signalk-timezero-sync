@@ -46,6 +46,8 @@ export interface ResourcesBridgeOptions {
   offerExisting: boolean;
   // TimeZero's route limit; 0 for none.
   maxRoutes: number;
+  // Where status messages go; the plugin status by default.
+  status?: (message: string) => void;
 }
 
 // Object kinds TimeZero limits in number; a new one is only sent while there
@@ -144,6 +146,10 @@ export class ResourcesBridge {
       guids.forEach((g) => this.awaitingNew.delete(g));
       this.retryHeld();
     });
+  }
+
+  private status(message: string): void {
+    (this.opts.status ?? ((m) => this.app.setPluginStatus(m)))(message);
   }
 
   private enqueue(op: () => Promise<void>): Promise<void> {
@@ -289,7 +295,7 @@ export class ResourcesBridge {
         ? ((resource as Route).feature?.geometry?.coordinates?.length ?? 0)
         : 0;
     if (points > MAX_ROUTE_POINTS) {
-      this.app.setPluginStatus(
+      this.status(
         `Route "${resource.name ?? id}" not sent: TimeZero takes at most ${MAX_ROUTE_POINTS} points per route, it has ${points}`,
       );
       return null;
@@ -297,7 +303,7 @@ export class ResourcesBridge {
     if (type === "regions") {
       const corners = regionCorners(resource as Region);
       if (!corners || corners.length > MAX_AREA_CORNERS) {
-        this.app.setPluginStatus(
+        this.status(
           `Region "${resource.name ?? id}" not sent: TimeZero takes one outline without holes, of 3 to ${MAX_AREA_CORNERS} corners`,
         );
         return null;
@@ -330,7 +336,7 @@ export class ResourcesBridge {
   ): Promise<void> {
     const resource = toSkResource(type, obj);
     if (!resource) return;
-    this.app.setPluginStatus(
+    this.status(
       `"${resource.name ?? id}" is locked in TimeZero: unlock it there to change or delete it`,
     );
     await this.app.resourcesApi.setResource(
@@ -362,7 +368,7 @@ export class ResourcesBridge {
         }
       }
       if (held.length)
-        this.app.setPluginStatus(
+        this.status(
           `${held.length} new route(s) or area(s) not sent: TimeZero has no room (at most ${this.opts.maxRoutes} routes, ${MAX_BOUNDARIES} areas and lines)`,
         );
       if (held.length && !accepted.length) this.save();

@@ -80,6 +80,7 @@ export class CourseBridge {
       // TimeZero updates its record while navigating; re-applying an unchanged
       // course would restart the Signal K leg each time.
       if (sameOrBothNull(toNavigation(await this.app.getCourse()), nav)) return;
+      this.app.debug(`TimeZero navigation to Signal K: ${describe(nav)}`);
       if (nav.kind === "none") await this.app.clearDestination();
       else if (nav.kind === "goto")
         await this.app.setDestination({ position: nav.destination });
@@ -122,8 +123,16 @@ export class CourseBridge {
     this.baseline = nav;
     // The latest course replaces an activation still waiting for its route.
     this.waitingFor = null;
-    if (!nav || sameNavigation(nav, this.peer.navigation)) return;
-    if (!this.isNewAction(nav, before, course)) return;
+    const change = `Signal K course ${describe(nav)} (was ${describe(before)}, TimeZero ${describe(this.peer.navigation)})`;
+    if (!nav || sameNavigation(nav, this.peer.navigation)) {
+      this.app.debug(`${change}: TimeZero has it`);
+      return;
+    }
+    if (!this.isNewAction(nav, before, course)) {
+      this.app.debug(`${change}: not sent, not a new action`);
+      return;
+    }
+    this.app.debug(`${change}: sent`);
     if (nav.kind === "route" && this.peer.isPending(nav.routeGuid)) {
       // TimeZero can only follow a route it has; activate once it pulled it.
       this.waitingFor = { guid: nav.routeGuid, nav };
@@ -158,6 +167,15 @@ export class CourseBridge {
 }
 
 type Course = Awaited<ReturnType<ServerAPI["getCourse"]>>;
+
+function describe(nav: Navigation | null): string {
+  if (!nav) return "not representable in TimeZero";
+  if (nav.kind === "goto")
+    return `go-to ${nav.destination.latitude.toFixed(5)},${nav.destination.longitude.toFixed(5)}${nav.mob ? " (MOB)" : ""}`;
+  if (nav.kind === "route")
+    return `route ${nav.routeGuid} point ${nav.pointIndex}`;
+  return "none";
+}
 
 // null when TimeZero cannot represent the course; it is then left alone
 // rather than cancelled.

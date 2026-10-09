@@ -37,6 +37,12 @@ of it.
   back in the next (`TimeZeroPeer.requestRound`).
 - TimeZero announces its own edits in its beacon but does not send them, so we
   read them (`GET UserObject`), which is safe.
+- In a round TimeZero usually sends an object it pulled from us straight back,
+  which confirms it. Not always: a new area came back neither in the round nor
+  in our next read, because the table tick TimeZero pushed was already past
+  its copy. So whenever TimeZero reads our offers, and with every round
+  request, we read its table from the lowest waiting offer; a copy ticked
+  above the offer confirms it.
 - **Never POST a UserObject table to TimeZero.** It takes a pushed table as
   master data and replaces its own CurrentTick and sync records with the ones
   in the push, which breaks its sync with every other device. Offer objects
@@ -55,8 +61,10 @@ of it.
   room, and routes over 500 points are not offered.
 - A MOB is a go-to with `IsManOverBoard` set in the ActiveRoute record. The
   MOB marks on the boat's TimeZero look like locked events (ObjectType 7,
-  icon 67; not confirmed live), which are not synced. Locked objects have
-  `Locked` = 1 (column 11). Areas are ObjectType 8 with their corners as a
+  icon 67; not confirmed live), which are not synced. Locked routes and marks
+  have `Locked` = 1 (column 11). An area's lock is not in its synced row
+  (confirmed live: column 11 stayed 0 on a locked area), so it cannot be
+  honoured. Areas are ObjectType 8 with their corners as a
   polyline blob; TimeZero holds 100 areas and lines together, of up to 50
   corners.
 - Timestamps count seconds from 2000-01-01. GUIDs travel in .NET byte order.
@@ -79,6 +87,11 @@ start-up safe` commit):
 - Never send state that predates the plugin. The Course API restores its saved
   course after plugins start; a new course counts only if its `startTime` is
   after the plugin started. Anchor changes in the first minute are ignored.
+- Never let the Course API take TimeZero's course from NMEA as well. TimeZero
+  puts its destination on NMEA 2000 while navigating, and with the Course API's
+  `apiOnly` off Signal K adopts it as a second path beside ours (confirmed
+  live: a cancel came back from the bus 15 s later, and go-tos bounced). The
+  plugin status warns while `apiOnly` is off.
 - Run `node test/e2e/run.mjs --seed <captured table>` before any live test: it
   starts from a real TimeZero table and a Signal K with existing state.
 

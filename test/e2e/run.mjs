@@ -293,6 +293,13 @@ async function defaultScenario() {
   const anchorSettled = Date.now() + 65000;
   let stopFeed = feedPosition();
 
+  // A fresh server has the Course API's API Only Mode off.
+  await waitFor("the plugin status warns that API Only Mode is off", async () =>
+    (await get(`${API}/skServer/plugins`))
+      .find((p) => p.id === "signalk-timezero-sync")
+      ?.statusMessage?.includes("API Only Mode"),
+  );
+
   console.log("== TimeZero -> Signal K: routes and marks on first contact");
   await waitFor(
     "TimeZero's route appears in Signal K",

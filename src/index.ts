@@ -74,6 +74,19 @@ const COURSE_PATHS =
 const MOB_PATH = /^notifications\.mob(\.|$)/;
 const RESOURCE_PATH = /^resources\.(routes|waypoints|regions)\.(.+)$/;
 
+// With the Course API's API Only Mode off, Signal K also takes the destination
+// TimeZero puts on NMEA 2000 as its course, a second path beside this plugin.
+const API_ONLY_WARNING =
+  'Turn on "API Only Mode" in Server → Settings: with it off, Signal K also takes TimeZero\'s course from NMEA, and a cancelled go-to comes back.';
+
+function courseApiOnly(app: ServerAPI): boolean | undefined {
+  return (
+    app as unknown as {
+      config?: { settings?: { courseApi?: { apiOnly?: boolean } } };
+    }
+  ).config?.settings?.courseApi?.apiOnly;
+}
+
 export default function (app: ServerAPI): Plugin {
   let peer: TimeZeroPeer | null = null;
   let resources: ResourcesBridge | null = null;
@@ -126,6 +139,13 @@ export default function (app: ServerAPI): Plugin {
         debug: (msg) => app.debug(msg),
         error: (msg) => app.error(msg),
       });
+      // The API Only Mode warning stays on every status, until it is fixed.
+      const warning =
+        config.syncNavigation !== false && courseApiOnly(app) === false
+          ? `. ${API_ONLY_WARNING}`
+          : "";
+      const status = (message: string) =>
+        app.setPluginStatus(`${message}${warning}`);
       const types: SyncedType[] = [];
       if (config.syncRoutes !== false) types.push("routes");
       if (config.syncWaypoints !== false) types.push("waypoints");
@@ -136,6 +156,7 @@ export default function (app: ServerAPI): Plugin {
           stateFile: path.join(dataDir, "resources.json"),
           offerExisting: config.offerExisting !== false,
           maxRoutes: config.maxRoutes ?? 200,
+          status,
         });
       if (config.syncNavigation !== false) course = new CourseBridge(app, peer);
       if (config.syncMob !== false) mob = new MobBridge(app, peer);
@@ -157,7 +178,7 @@ export default function (app: ServerAPI): Plugin {
       running
         .start()
         .then(() => {
-          app.setPluginStatus(`Syncing as ${running.hostId.split("/")[0]}`);
+          status(`Syncing as ${running.hostId.split("/")[0]}`);
         })
         .catch((err: NodeJS.ErrnoException) => {
           const message =

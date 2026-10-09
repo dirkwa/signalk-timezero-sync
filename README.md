@@ -27,6 +27,14 @@ and course, and their changes reach TimeZero.
   `PUT navigation.anchor.position`, such as Hoeken's Anchor Alarm. **Turn off its
   own "Sync Anchor with TimeZero"**: only one plugin can talk to TimeZero, and
   this one takes over the anchor sync.
+- For navigation: **turn on "API Only Mode" for the Course API** (Signal K
+  admin, Server → Settings). TimeZero puts its destination on the NMEA 2000
+  (or 0183) network while it navigates, and with API Only Mode off, Signal K
+  takes that destination over as its own course, beside this plugin. The two
+  then fight: a go-to cancelled in a Signal K app comes back from the network
+  about 15 seconds later, and a go-to set in Signal K bounces between both
+  paths. With API Only Mode on, the course goes only through this plugin, in
+  both directions. The plugin's status warns while it is off.
 - The network: TimeZero syncs without an account only with devices on a Furuno
   NavNet address (172.31.x.x). If the Signal K server has one, leave the user ID
   blank. On an ordinary LAN, TimeZero only syncs with peers that share its
@@ -48,10 +56,11 @@ TimeZero" setting. TimeZero stays the sync master.
   Signal K, and one deleted in Signal K is deleted in TimeZero and on every
   device TimeZero syncs with. Clearing out routes in TimeZero clears them in
   Signal K too, including Signal K routes TimeZero had just received.
-- **Locked objects stay locked.** TimeZero protects a locked route, mark or
-  area from being moved or deleted. Signal K has no lock, so a change made to
-  one in a Signal K app is undone there and not sent; the plugin's status says
-  so. Unlock it in TimeZero first.
+- **Locked objects stay locked.** TimeZero protects a locked route or mark
+  from being moved or deleted. Signal K has no lock, so a change made to one in
+  a Signal K app is undone there and not sent; the plugin's status says so.
+  Unlock it in TimeZero first. TimeZero does not share the lock of an area with
+  other devices, so a locked area is not protected from Signal K.
 - **Man overboard**: a MOB in TimeZero raises Signal K's Person Overboard alarm
   (Notifications API), and TimeZero ending it clears that alarm. A MOB alarm
   raised in Signal K, for example with Freeboard's MOB button, becomes a MOB
@@ -100,7 +109,12 @@ nor lets its older state overwrite a newer one.
   sent to TimeZero.
 - TimeZero's anchor watch is a circle; polygon and sector anchor zones are not
   sent.
-- Signal K changes reach TimeZero within a few seconds, not instantly.
+- Signal K changes reach TimeZero within a few seconds, not instantly;
+  sometimes TimeZero only answers the plugin's next request, a minute later.
+- If a Signal K plugin such as signalk-to-nmea2000 also puts Signal K's course
+  on the NMEA 2000 network, TimeZero and Signal K both send the same
+  destination there while navigating. Make sure an autopilot follows only one
+  of them.
 
 ## Development
 
