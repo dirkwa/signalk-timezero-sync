@@ -54,11 +54,17 @@ nor lets its older state overwrite a newer one.
 
 ## Limitations
 
-- On a Furuno NavNet TimeZero keeps at most 200 routes, and makes room for a
-  new one by deleting the route modified longest ago, on every device it syncs
+- **TimeZero holds at most 200 routes, of up to 500 points each.** This is a
+  hard limit of TimeZero's own "TimeZero" layer, the only one it syncs with
+  TZ iBoat, TZ Navigator and Furuno MFDs (see TimeZero's
+  [layer limits](https://userguide.mytimezero.com/tz-professional/Layer_Introduction.htm);
+  marks are limited to 30,000). When a 201st route arrives, TimeZero makes
+  room by deleting the route modified longest ago, on every device it syncs
   with. The plugin therefore only sends a new Signal K route while TimeZero has
-  room, and says so in its status when it holds one back. Edits and deletions
-  always go through.
+  room, and holds back a route of more than 500 points altogether; its status
+  says when it does. Edits and deletions of routes TimeZero has always go
+  through. To send held-back routes, delete old routes in TimeZero: they go
+  as soon as there is room.
 
 - Only changes made while the plugin runs are sent to TimeZero. A route or
   waypoint deleted in Signal K while the plugin was off stays in TimeZero, and a

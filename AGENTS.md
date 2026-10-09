@@ -47,10 +47,12 @@ of it.
 - Each restart with a new peer id makes TimeZero re-send every object and add a
   record for the new id to the state it shares with all its peers. The peer id
   and ticks are persisted in the data dir for that reason.
-- On a Furuno NavNet TimeZero holds at most 200 routes. A new route beyond that
-  makes it delete the route modified longest ago, everywhere it syncs. The
-  live count is on its diagnostics page (`GET /LanSynchronizationApi/`); new
-  routes are only offered while there is room.
+- TimeZero's synced "TimeZero" layer holds at most 200 routes of up to 500
+  points (documented in its user guide, Layer Introduction). A new route
+  beyond that makes it delete the route modified longest ago, everywhere it
+  syncs. The live count is on its diagnostics page
+  (`GET /LanSynchronizationApi/`); new routes are only offered while there is
+  room, and routes over 500 points are not offered.
 - Timestamps count seconds from 2000-01-01. GUIDs travel in .NET byte order.
 
 ## What the Signal K side must not do
