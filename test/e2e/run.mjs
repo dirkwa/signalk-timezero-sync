@@ -37,6 +37,8 @@ const TZ = "tz-sync-e2e-tz";
 const API = "http://127.0.0.1:3911";
 const CTL = "http://127.0.0.1:3912";
 const SELF = { latitude: -17.8075, longitude: 177.1545 };
+// Home of the image's node user, where Signal K keeps its config and plugins.
+const SK_HOME = "/home/node";
 
 const podman = (...a) =>
   execFileSync("podman", a, {
@@ -171,16 +173,16 @@ function serverHome({ maxRoutes = 2, anchorZone = null, preload = null } = {}) {
 function startServer(home) {
   const mounts = [
     "-v",
-    `${home}:/home/node/.signalk`,
+    `${home}:${SK_HOME}/.signalk`,
     "-v",
-    `${PLUGIN}:/home/node/.signalk/node_modules/signalk-timezero-sync:ro`,
+    `${PLUGIN}:${SK_HOME}/.signalk/node_modules/signalk-timezero-sync:ro`,
   ];
   if (ANCHOR_PLUGIN)
     mounts.push(
       "-v",
-      `${ANCHOR_PLUGIN}:/home/node/.signalk/node_modules/hoekens-anchor-alarm:ro`,
+      `${ANCHOR_PLUGIN}:${SK_HOME}/.signalk/node_modules/hoekens-anchor-alarm:ro`,
     );
-  let bin = "/home/node/signalk/node_modules/signalk-server/bin/signalk-server";
+  let bin = `${SK_HOME}/signalk/node_modules/signalk-server/bin/signalk-server`;
   if (SERVER_SRC) {
     mounts.push("-v", `${SERVER_SRC}:/sk:ro`);
     bin = "/sk/bin/signalk-server";
@@ -203,7 +205,7 @@ function startServer(home) {
     "--env",
     "PORT=3000",
     "--env",
-    "SIGNALK_NODE_CONF_DIR=/home/node/.signalk",
+    `SIGNALK_NODE_CONF_DIR=${SK_HOME}/.signalk`,
     "--env",
     "DEBUG=signalk-timezero-sync",
     "--entrypoint",
