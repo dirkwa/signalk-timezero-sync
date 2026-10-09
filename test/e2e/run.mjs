@@ -664,8 +664,67 @@ async function firstContact(seed) {
     after.failures.join("; "),
   );
   stopFeed();
+
+  // A restart that lost the record of which objects came from TimeZero (a
+  // deleted or older resources.json) while the peer state survived: TimeZero
+  // then sends nothing on rejoin, and Signal K's copies of its objects must
+  // not look new.
+  console.log("== restart without resources.json");
+  quiet("rm", "-f", "-t", "5", SK);
+  const state = path.join(home, "plugin-config-data", "signalk-timezero-sync");
+  fs.renameSync(
+    path.join(state, "resources.json"),
+    path.join(state, "resources.json.lost"),
+  );
+  const pullsBefore = after.log.filter((l) => l.includes("round: pulled"));
+  startServer(home);
+  await serverReady();
+  const stopFeed2 = feedPosition();
+  await waitFor(
+    "the plugin knows TimeZero's objects again",
+    () => {
+      try {
+        const saved = JSON.parse(
+          fs.readFileSync(path.join(state, "resources.json"), "utf8"),
+        );
+        return Object.keys(saved.known).length >= liveNoLayer("5");
+      } catch {
+        return false;
+      }
+    },
+    180000,
+  );
+  // A rejoin pause and a round, had anything been offered.
+  await sleep(45000);
+  const restarted = await tz();
+  const pullsAfter = restarted.log.filter((l) => l.includes("round: pulled"));
+  check(
+    "after the restart TimeZero pulls nothing",
+    pullsAfter.length === pullsBefore.length,
+    pullsAfter.slice(pullsBefore.length).join("; "),
+  );
+  const offered = JSON.parse(
+    fs.readFileSync(path.join(state, "peer.json"), "utf8"),
+  ).offered;
+  check(
+    "after the restart nothing is offered",
+    Object.keys(offered).length === 0,
+    Object.keys(offered).slice(0, 5).join(", "),
+  );
+  const changedAfterRestart = restarted.objects.filter((o) => {
+    const orig = seedByGuid.get(o.guid);
+    return (
+      orig && (o.tick !== orig.Tick || String(o.deleted) !== row(orig)[10])
+    );
+  });
+  check(
+    "after the restart none of TimeZero's objects changed",
+    changedAfterRestart.length === 0,
+    JSON.stringify(changedAfterRestart.slice(0, 5)),
+  );
+  stopFeed2();
   console.log(
-    "\n-- fake TimeZero log (tail) --\n" + after.log.slice(-25).join("\n"),
+    "\n-- fake TimeZero log (tail) --\n" + restarted.log.slice(-25).join("\n"),
   );
 }
 
