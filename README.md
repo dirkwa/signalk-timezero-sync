@@ -1,3 +1,5 @@
+<img src="icon.svg" alt="" width="96" align="right">
+
 # TimeZero Sync for Signal K
 
 Keeps Signal K and [TimeZero](https://mytimezero.com/) (TZ Professional and TZ
