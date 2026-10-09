@@ -92,7 +92,7 @@ start-up safe` commit):
 ## Commands
 
 ```sh
-npm test            # unit tests
+npm test            # unit tests, type-checked too (vitest typecheck)
 npm run ci-lint     # eslint + prettier --check
 npm run typecheck
 npm run build
