@@ -36,6 +36,7 @@
   "engines": {
     "node": ">=22.12"
   },
+  "signalk-plugin-enabled-by-default": true,
   "signalk": {
     "displayName": "TimeZero Sync",
     "recommends": [

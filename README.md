@@ -40,6 +40,10 @@ and course, and their changes reach TimeZero.
   blank. On an ordinary LAN, TimeZero only syncs with peers that share its
   My TIMEZERO user ID; enter it in the plugin settings (experimental).
 
+The plugin enables itself when it is installed and starts syncing at the next
+server start, with the default settings. These include offering TimeZero the
+Signal K routes, waypoints and regions it has never had.
+
 ## How it works
 
 The plugin joins TimeZero's sync as a peer named after the "Name shown in
