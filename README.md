@@ -135,4 +135,4 @@ relies on in TimeZero's sync, and the rules for testing against a real one.
 
 ## License
 
-MIT
+Copyright 2026 Dirk Wahrheit. Licensed under the [Apache License 2.0](LICENSE).

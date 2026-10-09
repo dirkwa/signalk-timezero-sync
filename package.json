@@ -26,7 +26,7 @@
     "navnet"
   ],
   "author": "Dirk Wahrheit",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dirkwa/signalk-timezero-sync.git"
