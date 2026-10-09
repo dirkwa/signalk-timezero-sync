@@ -126,7 +126,7 @@ nor lets its older state overwrite a newer one.
 npm install
 npm test
 npm run build
-node test/e2e/run.mjs --image ghcr.io/signalk/signalk-server:latest --anchor-plugin ../hoekens-anchor-alarm
+node test/e2e/run.ts --image ghcr.io/signalk/signalk-server:latest --anchor-plugin ../hoekens-anchor-alarm
 ```
 
 The end-to-end test runs a real Signal K server against a fake TimeZero master

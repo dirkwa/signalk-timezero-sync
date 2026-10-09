@@ -13,9 +13,9 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "lint": "eslint .",
-    "format": "prettier --write . && eslint --fix .",
-    "ci-lint": "eslint . && prettier --check .",
+    "lint": "eslint --flag unstable_native_nodejs_ts_config .",
+    "format": "prettier --write . && eslint --flag unstable_native_nodejs_ts_config --fix .",
+    "ci-lint": "eslint --flag unstable_native_nodejs_ts_config . && prettier --check .",
     "prepare": "npm run build"
   },
   "keywords": [
@@ -53,7 +53,6 @@
     "@signalk/server-api": "^2.33.0",
     "@types/node": "^24.19.1",
     "eslint": "^10.12.0",
-    "globals": "^17.13.0",
     "prettier": "^3.9.9",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.71.1",

@@ -92,7 +92,7 @@ start-up safe` commit):
   `apiOnly` off Signal K adopts it as a second path beside ours (confirmed
   live: a cancel came back from the bus 15 s later, and go-tos bounced). The
   plugin status warns while `apiOnly` is off.
-- Run `node test/e2e/run.mjs --seed <captured table>` before any live test: it
+- Run `node test/e2e/run.ts --seed <captured table>` before any live test: it
   starts from a real TimeZero table and a Signal K with existing state.
 
 ## Rules
@@ -119,5 +119,5 @@ npm test            # unit tests, type-checked too (vitest typecheck)
 npm run ci-lint     # eslint + prettier --check
 npm run typecheck
 npm run build
-node test/e2e/run.mjs --image <signalk-server image> --anchor-plugin <dir>
+node test/e2e/run.ts --image <signalk-server image> --anchor-plugin <dir>
 ```
