@@ -39,9 +39,9 @@ TimeZero" setting. TimeZero stays the sync master.
   each object is the same on both sides. TimeZero sends its routes and marks
   when the plugin joins, and the plugin reads later edits as TimeZero announces
   them. A route or waypoint created, edited or deleted in Signal K is offered to
-  TimeZero, which collects it the next time the plugin joins. To make that
-  happen, the plugin goes quiet for the "rejoin pause" (default 60 s) until
-  TimeZero drops it, then rejoins.
+  TimeZero, which collects it in a sync round. The plugin starts one by
+  briefly claiming the sync master role in a single beacon, which makes
+  TimeZero sync with it; the next beacon hands the role straight back.
 - **Navigation**: TimeZero's go-to and active route map to the Signal K Course
   API both ways. A route has to exist on both sides before it can be activated,
   so activating a new Signal K route waits until TimeZero has collected it.
@@ -72,7 +72,7 @@ nor lets its older state overwrite a newer one.
   sent to TimeZero.
 - TimeZero's anchor watch is a circle; polygon and sector anchor zones are not
   sent.
-- Signal K changes reach TimeZero after the rejoin pause, not instantly.
+- Signal K changes reach TimeZero within a few seconds, not instantly.
 
 ## Development
 

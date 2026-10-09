@@ -297,7 +297,7 @@ export class ResourcesBridge {
     this.save();
     this.peer.offer(accepted.map((c) => c.obj));
     this.app.debug(`offered ${accepted.length} object(s) to TimeZero`);
-    this.peer.rejoin();
+    this.peer.requestRound();
   }
 
   private async routeRoom(): Promise<number> {

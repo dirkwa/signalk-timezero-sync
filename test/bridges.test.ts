@@ -175,7 +175,6 @@ function makePeer() {
     hostName: "SignalK",
     userId: "",
     stateFile: path.join(dir, "peer.json"),
-    rejoinPauseMs: 60000,
     debug: () => {},
     error: () => {},
   });
@@ -193,7 +192,7 @@ describe("resources bridge", () => {
     vi.spyOn(peer, "offer").mockImplementation((objs) =>
       offers.push(...objs.map((o) => o.guid)),
     );
-    vi.spyOn(peer, "rejoin").mockImplementation(() => {});
+    vi.spyOn(peer, "requestRound").mockImplementation(() => {});
     // The provider's write deltas go to the bridge, created just below.
     const ref: { bridge?: ResourcesBridge } = {};
     const { app, store } = mockApp((type, id, value) =>
@@ -360,7 +359,7 @@ describe("resources bridge", () => {
         vi.spyOn(peer, "liveRouteCount").mockImplementation(
           async () => count.live,
         );
-        vi.spyOn(peer, "rejoin").mockImplementation(() => {});
+        vi.spyOn(peer, "requestRound").mockImplementation(() => {});
         const real = peer.offer.bind(peer);
         vi.spyOn(peer, "offer").mockImplementation((objs) => {
           offers.push(...objs.map((o) => o.guid));

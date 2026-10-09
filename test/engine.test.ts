@@ -30,7 +30,6 @@ function makePeer() {
     hostName: "SignalK",
     userId: "",
     stateFile: path.join(dir, "peer.json"),
-    rejoinPauseMs: 60000,
     debug: () => {},
     error: () => {},
   });
@@ -182,24 +181,35 @@ describe("offering objects for TimeZero to pull", () => {
     }
   });
 
-  test("going quiet stops the beacon until the pause is over", () => {
+  test("claims the master role in one beacon while offers wait, so TimeZero syncs", () => {
     const peer = makePeer();
     const sent: string[] = [];
     const internals = peer as unknown as {
       socket: { send: (b: string) => void };
       broadcastAddresses: () => string[];
       sendBeacon: () => void;
-      silentUntil: number;
+      nextClaimAt: number;
     };
     internals.socket = { send: (b) => sent.push(b) };
     internals.broadcastAddresses = () => ["172.31.255.255"];
+    const visibleHosts = () => sent.map((b) => b.split(";")[8]);
+    peer.onBeacon(tzBeacon({}), TZ_ADDRESS);
     internals.sendBeacon();
-    peer.rejoin();
+    // Nothing to hand over: TimeZero stays master.
+    peer.requestRound();
     internals.sendBeacon();
-    expect(sent).toHaveLength(1);
-    internals.silentUntil = Date.now() - 1;
+    peer.offer([{ guid: ROUTE_GUID, values: routeRow("A"), points: null }]);
     internals.sendBeacon();
-    expect(sent).toHaveLength(2);
+    internals.sendBeacon();
+    expect(visibleHosts()).toEqual(["1", "1", "99", "1"]);
+    // Asked again soon after: not before the minimum gap.
+    peer.requestRound();
+    internals.sendBeacon();
+    expect(visibleHosts().at(-1)).toBe("1");
+    // Still not collected a while later: asked again.
+    internals.nextClaimAt = Date.now() - 1;
+    internals.sendBeacon();
+    expect(visibleHosts().at(-1)).toBe("99");
   });
 });
 

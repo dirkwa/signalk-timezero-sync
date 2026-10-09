@@ -27,10 +27,14 @@ of it.
   TimeZero present that must be TimeZero, so we advertise 1.
 - Without a My TIMEZERO user id, TimeZero trusts only 172.31.x.x (NavNet)
   addresses.
-- The master runs a sync round only when a peer joins: lock, schema, read the
-  peer's objects above its record, push its own, then active route and FishIt.
-  A higher tick in our beacon does not start one, so to hand TimeZero a change
-  we go quiet until it drops us and rejoin (`TimeZeroPeer.rejoin`).
+- The master runs a sync round when a new peer appears, or when a peer's beacon
+  claims the master role (a visible-hosts count above its own): lock, schema,
+  read the peer's objects above its record, push its own, then active route
+  and FishIt. Nothing else starts one: not a higher tick in our beacon, not a
+  lower active-route or FishIt tick, and not a peer coming back after a pause
+  (TimeZero keeps a silent peer listed for more than ten minutes). So to hand
+  TimeZero a change we claim the master role in a single beacon and give it
+  back in the next (`TimeZeroPeer.requestRound`).
 - TimeZero announces its own edits in its beacon but does not send them, so we
   read them (`GET UserObject`), which is safe.
 - **Never POST a UserObject table to TimeZero.** It takes a pushed table as

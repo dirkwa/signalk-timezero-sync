@@ -1,10 +1,12 @@
 // A fake TimeZero Professional acting as LAN sync master, for end-to-end
 // tests. It follows what a real TZ Professional 5.0 did on a boat's NavNet:
 //  - beacons every second with its table, route and anchor ticks;
-//  - when a peer joins (or returns after going quiet) it runs a sync round:
-//    lock, schema, read the peer's objects above the peer's record, push its
-//    own objects above that record, read then push the active route and
-//    FishIt, release; the peer's record is then its current tick;
+//  - when a new peer appears, or a peer's beacon claims the master role (more
+//    visible hosts than its own 2), it runs a sync round: lock, schema, read
+//    the peer's objects above the peer's record, push its own objects above
+//    that record, read then push the active route and FishIt, release; the
+//    peer's record is then its current tick. A peer that goes quiet and comes
+//    back gets no round: TimeZero keeps it listed for more than ten minutes;
 //  - it takes pushed ActiveRoute and AnchorWatch records as they come;
 //  - a pushed UserObject table is adopted as master data, which is why a peer
 //    must never push one. Any such push is logged as a failure.
@@ -35,7 +37,8 @@ const BROADCAST = process.env.BROADCAST;
 const NAME = "NAVSTATION";
 const UUID = crypto.randomUUID();
 const HOST_ID = `${NAME}/${UUID}`;
-const PEER_GONE_MS = 8000;
+// Its visible-hosts count; a peer advertising more claims the master role.
+const OWN_VISIBLE_HOSTS = 2;
 // On a Furuno NavNet TimeZero keeps at most 200 routes and deletes the route
 // modified longest ago to make room for a new one.
 const MAX_ROUTES = Number(process.env.MAX_ROUTES || 200);
@@ -50,7 +53,7 @@ const s = {
   log: [],
   failures: [],
 };
-const peers = new Map(); // address -> { hostId, lastSeen, port }
+const peers = new Map(); // address -> { hostId, lastSeen, claims }
 const log = (line) =>
   s.log.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
 
@@ -146,10 +149,12 @@ udp.on("message", (msg, rinfo) => {
   const f = msg.toString("utf8").split(";");
   if (f[0] !== "TZ Sync 1.0" || f[6] === HOST_ID || f[4] !== USER_ID) return;
   const known = peers.get(rinfo.address);
-  const returning = !known || Date.now() - known.lastSeen > PEER_GONE_MS;
-  peers.set(rinfo.address, { hostId: f[6], lastSeen: Date.now() });
-  if (returning) {
-    log(`peer ${f[6]} joined`);
+  const visibleHosts = Number(f[8]);
+  const claims = visibleHosts > OWN_VISIBLE_HOSTS;
+  const isNew = !known || known.hostId !== f[6];
+  peers.set(rinfo.address, { hostId: f[6], lastSeen: Date.now(), claims });
+  if (isNew || (claims && !known.claims)) {
+    log(`peer ${f[6]} ${isNew ? "joined" : "claimed master"}`);
     setTimeout(
       () =>
         void round(rinfo.address).catch((e) =>
@@ -162,7 +167,7 @@ udp.on("message", (msg, rinfo) => {
 udp.bind(33000, () => {
   udp.setBroadcast(true);
   setInterval(() => {
-    const beacon = `TZ Sync 1.0;${NAME};TZ Professional;;${USER_ID};Cloud;${HOST_ID};33745900;2;1;${s.currentTick};${s.activeRoute.CurrentTick};0;167;${s.anchor.ChangeTick};0;175906`;
+    const beacon = `TZ Sync 1.0;${NAME};TZ Professional;;${USER_ID};Cloud;${HOST_ID};33745900;${OWN_VISIBLE_HOSTS};1;${s.currentTick};${s.activeRoute.CurrentTick};0;167;${s.anchor.ChangeTick};0;175906`;
     udp.send(beacon, 33000, BROADCAST);
   }, 1000);
 });

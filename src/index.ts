@@ -51,13 +51,6 @@ const ConfigSchema = Type.Object({
       "Leave blank on a Furuno NavNet (172.31.x.x) network. On an ordinary LAN, TimeZero only syncs with peers that advertise the same My TIMEZERO user ID (a GUID).",
     default: "",
   }),
-  rejoinPauseSeconds: Type.Number({
-    title: "Rejoin pause (seconds)",
-    description:
-      "TimeZero only collects changes from a peer when the peer joins. To send a change, the plugin goes quiet this long so TimeZero drops it, then rejoins.",
-    default: 60,
-    minimum: 10,
-  }),
 });
 type Config = Static<typeof ConfigSchema>;
 
@@ -114,7 +107,6 @@ export default function (app: ServerAPI): Plugin {
         hostName: config.hostName || "SignalK",
         userId: (config.userId ?? "").trim(),
         stateFile: path.join(dataDir, "peer.json"),
-        rejoinPauseMs: (config.rejoinPauseSeconds ?? 60) * 1000,
         debug: (msg) => app.debug(msg),
         error: (msg) => app.error(msg),
       });
@@ -148,11 +140,6 @@ export default function (app: ServerAPI): Plugin {
         .start()
         .then(() => {
           app.setPluginStatus(`Syncing as ${running.hostId.split("/")[0]}`);
-          // Offers still waiting from before a restart need a rejoin: a
-          // quick restart goes unnoticed by TimeZero.
-          running.on("joined", () => {
-            if (running.hasUnpulledOffers) running.rejoin();
-          });
         })
         .catch((err: NodeJS.ErrnoException) => {
           const message =

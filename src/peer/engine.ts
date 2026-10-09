@@ -5,10 +5,13 @@
 // How TimeZero behaves, as observed on a TZ Professional 5.0:
 //  - The peer with the highest visible-host count is sync master. With a real
 //    TimeZero present that is TimeZero, and we advertise 1 so we never contend.
-//  - The master runs a sync round when a peer appears: GetLock, POST Schema,
+//  - The master runs a sync round when a new peer appears, or when a peer's
+//    beacon claims the master role: GetLock, POST Schema,
 //    GET UserObject?MinTick=<what it has from us>, POST UserObject (its changes),
 //    GET then POST ActiveRoute, GET then POST FishIt, ReleaseLock. A higher
-//    table tick in our beacon alone does not start a round.
+//    tick in our beacon does not start a round, and neither does a peer
+//    returning after a pause: TimeZero keeps a silent peer listed for more
+//    than ten minutes.
 //  - A POSTed UserObject table is taken as master data: the receiver adopts its
 //    CurrentTick and SyncTicks. So we never push tables, we only offer them.
 //  - ActiveRoute and AnchorWatch changes are announced in the beacon (fields 11
@@ -51,6 +54,10 @@ const REQUEST_TIMEOUT_MS = 5000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const VISIBLE_HOSTS_SOLE = 99;
 const VISIBLE_HOSTS_DEFERRED = 1;
+// A claim of the master role in one beacon makes TimeZero sync with us. Asked
+// again while TimeZero has not collected our offers, but not more often.
+const ROUND_RETRY_MS = 60000;
+const ROUND_MIN_GAP_MS = 10000;
 const API = "/LanSynchronizationApi";
 const TABLE_PAGE_SIZE = 1000;
 // A full table of a few thousand objects fits in a handful of pages; the cap
@@ -63,8 +70,6 @@ export interface PeerOptions {
   stateFile: string;
   debug: (msg: string) => void;
   error: (msg: string) => void;
-  // How long to stay silent so TimeZero drops us and syncs on our return.
-  rejoinPauseMs: number;
 }
 
 export interface PeerEvents {
@@ -92,7 +97,9 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
   private socket: dgram.Socket | null = null;
   private server: http.Server | null = null;
   private beaconTimer: NodeJS.Timeout | null = null;
-  private silentUntil = 0;
+  // When to claim the master role in a beacon next, while offers wait.
+  private nextClaimAt = 0;
+  private lastClaim = 0;
   private lockHolder: string | null = null;
   private lockTakenAt = 0;
   private busy = false;
@@ -218,13 +225,25 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     return highest + 1;
   }
 
-  // Go quiet until TimeZero drops us; it runs a sync round when we return.
-  rejoin(): void {
-    if (Date.now() < this.silentUntil) return;
-    this.opts.debug(
-      `going silent for ${this.opts.rejoinPauseMs} ms so TimeZero syncs on return`,
-    );
-    this.silentUntil = Date.now() + this.opts.rejoinPauseMs;
+  // Have TimeZero sync with us soon, to collect what we offer.
+  requestRound(): void {
+    this.nextClaimAt = Math.max(Date.now(), this.lastClaim + ROUND_MIN_GAP_MS);
+  }
+
+  // One beacon claiming the master role makes TimeZero run a round with us;
+  // the next one gives the role back. Only while offers wait for TimeZero.
+  private claimNow(): boolean {
+    const now = Date.now();
+    if (
+      now < this.nextClaimAt ||
+      !this.hasUnpulledOffers ||
+      !this.otherTimeZeroPresent()
+    )
+      return false;
+    this.lastClaim = now;
+    this.nextClaimAt = now + ROUND_RETRY_MS;
+    this.opts.debug("asking TimeZero for a sync round");
+    return true;
   }
 
   // ---- discovery ----------------------------------------------------------
@@ -244,14 +263,15 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
   }
 
   private sendBeacon(): void {
-    if (!this.socket || Date.now() < this.silentUntil) return;
+    if (!this.socket) return;
     const beacon = buildBeacon({
       name: this.opts.hostName,
       userId: this.opts.userId,
       uuid: this.state.uuid,
-      visibleHosts: this.otherTimeZeroPresent()
-        ? VISIBLE_HOSTS_DEFERRED
-        : VISIBLE_HOSTS_SOLE,
+      visibleHosts:
+        this.claimNow() || !this.otherTimeZeroPresent()
+          ? VISIBLE_HOSTS_SOLE
+          : VISIBLE_HOSTS_DEFERRED,
       tableTick: this.servedTick,
       routeTick: this.state.routeTick,
       fishItTick: this.state.fishIt?.ChangeTick ?? 0,

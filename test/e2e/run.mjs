@@ -124,7 +124,6 @@ function serverHome({ maxRoutes = 2, anchorZone = null, preload = null } = {}) {
   plugin("signalk-timezero-sync", {
     hostName: "SignalK-E2E",
     userId: USER_ID,
-    rejoinPauseSeconds: 12,
     maxRoutes,
   });
   plugin("resources-provider", {
@@ -361,7 +360,7 @@ async function defaultScenario() {
     JSON.stringify(created),
   );
   await waitFor(
-    "TimeZero pulls route B after the rejoin",
+    "TimeZero pulls route B in the round it asked for",
     async () =>
       (await tz()).objects.some(
         (o) => o.guid === routeB && o.name === "SK Route B" && o.deleted === 0,
@@ -455,7 +454,7 @@ async function defaultScenario() {
   console.log("== Signal K -> TimeZero: a deletion");
   await send("DELETE", `${API}/signalk/v2/api/resources/routes/${routeB}`);
   await waitFor(
-    "TimeZero gets route B's deletion after the rejoin",
+    "TimeZero gets route B's deletion in the round it asked for",
     async () =>
       (await tz()).objects.some((o) => o.guid === routeB && o.deleted === 1),
     60000,
@@ -611,7 +610,7 @@ async function firstContact(seed) {
     async () => (await tz()).objects.some((o) => o.guid === SK_WAYPOINT),
     90000,
   );
-  // Let any further offers and rejoins play out.
+  // Let any further offers and rounds play out.
   await sleep(45000);
   const after = await tz();
   const seedByGuid = new Map(table.Objects.map((o) => [o.Guid, o]));
@@ -667,7 +666,7 @@ async function firstContact(seed) {
 
   // A restart that lost the record of which objects came from TimeZero (a
   // deleted or older resources.json) while the peer state survived: TimeZero
-  // then sends nothing on rejoin, and Signal K's copies of its objects must
+  // then sends nothing on return, and Signal K's copies of its objects must
   // not look new.
   console.log("== restart without resources.json");
   quiet("rm", "-f", "-t", "5", SK);
@@ -694,7 +693,7 @@ async function firstContact(seed) {
     },
     180000,
   );
-  // A rejoin pause and a round, had anything been offered.
+  // Time for a round, had anything been offered.
   await sleep(45000);
   const restarted = await tz();
   const pullsAfter = restarted.log.filter((l) => l.includes("round: pulled"));
