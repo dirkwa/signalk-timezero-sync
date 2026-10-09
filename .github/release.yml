@@ -1,0 +1,23 @@
+# GitHub's release notes, which release-please uses (changelog-type github):
+# the merged PRs sorted by label, with their authors and new contributors.
+# label-by-title.yml sets the labels from each PR's conventional title.
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+      # release-please's own release PR, merged right before each tag.
+      - "autorelease: pending"
+      - "autorelease: tagged"
+  categories:
+    - title: 🚀 Features
+      labels:
+        - enhancement
+    - title: 🐛 Fixes
+      labels:
+        - bug
+    - title: 📦 Dependencies
+      labels:
+        - dependencies
+    - title: Other
+      labels:
+        - "*"
