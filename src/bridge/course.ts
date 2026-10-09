@@ -142,7 +142,7 @@ export class CourseBridge {
     if (
       nav.kind === "route" &&
       before?.kind === "route" &&
-      nav.routeGuid === before.routeGuid
+      nav.routeGuid.toLowerCase() === before.routeGuid.toLowerCase()
     )
       return true;
     // A cancel only goes when the two sides agreed before it; clearing an old

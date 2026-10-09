@@ -586,6 +586,38 @@ describe("course bridge", () => {
     );
   });
 
+  test("a route GUID in another case is still the same route", async () => {
+    const peer = makePeer();
+    const old = { ...routeCourse(), startTime: "2026-10-08T01:40:04.715Z" };
+    const bridge = new CourseBridge(courseApp(old).app, peer);
+    await vi.runAllTimersAsync();
+    // TimeZero's copy of the course, with the GUID in upper case.
+    await bridge.fromTimeZero({
+      kind: "route",
+      origin: null,
+      routeGuid: ID.toUpperCase(),
+      pointIndex: 1,
+    });
+    peer.setNavigation({
+      kind: "route",
+      origin: null,
+      routeGuid: ID.toUpperCase(),
+      pointIndex: 1,
+    });
+    const set = vi.spyOn(peer, "setNavigation");
+    const app = (
+      bridge as unknown as { app: { getCourse: () => Promise<unknown> } }
+    ).app;
+    app.getCourse = async () => ({
+      ...old,
+      activeRoute: { ...old.activeRoute, pointIndex: 2 },
+    });
+    await bridge.fromSignalK();
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({ pointIndex: 2 }),
+    );
+  });
+
   test("a course set while running is sent", async () => {
     const peer = makePeer();
     const set = vi.spyOn(peer, "setNavigation");
