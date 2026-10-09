@@ -50,6 +50,8 @@ interface Candidate {
 }
 
 const CHANGE_SETTLE_MS = 1000;
+// TimeZero's synced layer holds routes of at most 500 points.
+const MAX_ROUTE_POINTS = 500;
 
 interface SavedState {
   known: Record<string, Known>;
@@ -254,6 +256,16 @@ export class ResourcesBridge {
     }
     const print = fingerprint(type, resource);
     if (known?.fingerprint === print) return null;
+    const points =
+      type === "routes"
+        ? ((resource as Route).feature?.geometry?.coordinates?.length ?? 0)
+        : 0;
+    if (points > MAX_ROUTE_POINTS) {
+      this.app.setPluginStatus(
+        `Route "${resource.name ?? id}" not sent: TimeZero takes at most ${MAX_ROUTE_POINTS} points per route, it has ${points}`,
+      );
+      return null;
+    }
     const obj =
       type === "routes"
         ? fromSkRoute(id, resource as Route, previous, now)
@@ -272,9 +284,9 @@ export class ResourcesBridge {
     };
   }
 
-  // On a Furuno NavNet, TimeZero holds at most 200 routes and makes room for
-  // a new one by deleting the route modified longest ago, on every device it
-  // syncs with. So a new Signal K route is only sent while there is room.
+  // TimeZero's synced layer holds at most 200 routes, and TimeZero makes room
+  // for a new one by deleting the route modified longest ago, on every device
+  // it syncs with. So a new Signal K route is only sent while there is room.
   private async commitNow(candidates: Candidate[]): Promise<void> {
     const newRoutes = candidates.filter((c) => c.newRoute);
     let accepted = candidates.filter((c) => !c.newRoute);

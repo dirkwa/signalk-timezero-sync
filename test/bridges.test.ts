@@ -432,6 +432,28 @@ describe("resources bridge", () => {
     });
   });
 
+  test("does not send a route with more points than TimeZero takes", async () => {
+    const { bridge, offers, status } = setup();
+    const long: Route = {
+      ...route,
+      feature: {
+        ...route.feature,
+        geometry: {
+          type: "LineString",
+          coordinates: Array.from({ length: 501 }, (_, i) => [
+            177 + i * 0.001,
+            -17.8,
+          ]),
+        },
+        properties: {},
+      },
+    };
+    bridge.onResourceDelta("routes", ID, long);
+    await vi.runAllTimersAsync();
+    expect(offers).toEqual([]);
+    expect(status).toHaveBeenCalledWith(expect.stringContaining("500 points"));
+  });
+
   test("on start, leaves them alone when offering existing ones is off", async () => {
     const { bridge, store, offers } = setup(false);
     store.routes![ID] = route;

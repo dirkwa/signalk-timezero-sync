@@ -31,7 +31,7 @@ const ConfigSchema = Type.Object({
   maxRoutes: Type.Number({
     title: "TimeZero route limit",
     description:
-      "On a Furuno NavNet, TimeZero keeps at most 200 routes and deletes the route modified longest ago to make room for a new one, on every device it syncs with. New Signal K routes are only sent while TimeZero has room. 0 turns the check off.",
+      "TimeZero's synced layer holds at most 200 routes, and TimeZero deletes the route modified longest ago to make room for a new one, on every device it syncs with. New Signal K routes are only sent while TimeZero has room; delete old routes in TimeZero to make some. 0 turns the check off.",
     default: 200,
     minimum: 0,
   }),
