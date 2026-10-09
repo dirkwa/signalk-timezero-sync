@@ -621,7 +621,11 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
         if (path === `${API}/UserObject` && req.method === "GET") {
           const minTick = Number(url.searchParams.get("MinTick") ?? 0) || 0;
           const limit = Number(url.searchParams.get("Limit") ?? 5000) || 5000;
-          return json(200, this.serveObjects(minTick, limit));
+          const table = this.serveObjects(minTick, limit);
+          this.opts.debug(
+            `TimeZero reads our objects above ${minTick}: ${table.Objects.length} sent`,
+          );
+          return json(200, table);
         }
         if (path === `${API}/UserObject` && req.method === "POST") {
           this.acceptObjects(JSON.parse(body) as UserObjectTableDto);
@@ -674,6 +678,9 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
           this.save();
           return res.writeHead(201).end();
         }
+        // A schema post opens each sync round.
+        if (path === `${API}/Schema` && req.method === "POST")
+          this.opts.debug(`sync round from ${remote}`);
         // Schema posts and TimeZero's reachability probe (GET /).
         return res.writeHead(200).end();
       })
