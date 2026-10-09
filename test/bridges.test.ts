@@ -612,6 +612,23 @@ describe("resources bridge", () => {
     expect(saved.tableTick).toBe(33500);
   });
 
+  test("a kind synced for the first time makes the peer read TimeZero's table again", () => {
+    // State from a version that synced routes and waypoints only.
+    fs.writeFileSync(
+      path.join(dir, "peer.json"),
+      JSON.stringify({
+        uuid: "b0b0afa6-0000-4000-8000-000000000000",
+        tzTableTick: 33500,
+      }),
+    );
+    fs.writeFileSync(
+      path.join(dir, "resources.json"),
+      JSON.stringify({ known: {}, tableTick: 33500, seen: [] }),
+    );
+    const { peer } = setup();
+    expect((peer as unknown as { readFrom: number | null }).readFrom).toBe(0);
+  });
+
   test("on start, never offers a resource TimeZero has had, even one deleted there", async () => {
     const { bridge, store, offers } = setup();
     const deleted = { ...tzRoute(), values: tombstone(tzRoute(), NOW).values };

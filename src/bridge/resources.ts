@@ -73,6 +73,8 @@ interface SavedState {
   tableTick: number;
   // Every route and mark guid TimeZero has sent, deleted ones included.
   seen: string[];
+  // The kinds `known` covers. Older state files predate regions.
+  types: SyncedType[];
   // New routes and areas offered but not yet pulled: each holds one of
   // TimeZero's places until it is pulled, across restarts too.
   awaitingNew: string[];
@@ -105,13 +107,16 @@ export class ResourcesBridge {
     this.known = saved.known;
     this.tableTick = saved.tableTick;
     this.seen = new Set(saved.seen);
-    this.inStep = this.tableTick >= peer.tableTick;
-    if (!this.inStep) {
+    // A kind synced for the first time (just switched on, or new in this
+    // version) has objects TimeZero sent before and will not send again.
+    const added = opts.types.filter((t) => !saved.types.includes(t));
+    this.inStep = this.tableTick >= peer.tableTick && !added.length;
+    if (!this.inStep && peer.tableTick > 0) {
       app.debug(
-        `resource state is at tick ${this.tableTick}, the peer at ${peer.tableTick}: reading TimeZero's table again`,
+        `resource state is at tick ${this.tableTick} for ${saved.types.join(", ")}, the peer at ${peer.tableTick}: reading TimeZero's table again`,
       );
       peer.rereadTable();
-    }
+    } else this.inStep = true;
     this.awaitingNew = new Set(
       saved.awaitingNew.filter((g) => peer.isPending(g)),
     );
@@ -435,6 +440,7 @@ export class ResourcesBridge {
         known: this.known,
         tableTick: this.tableTick,
         seen: [...this.seen],
+        types: this.opts.types,
         awaitingNew: [...this.awaitingNew],
         held: Object.fromEntries(this.held),
       };
@@ -453,10 +459,18 @@ function loadState(file: string): SavedState {
       known: s.known ?? {},
       tableTick: s.tableTick ?? 0,
       seen: s.seen ?? [],
+      types: s.types ?? ["routes", "waypoints"],
       awaitingNew: s.awaitingNew ?? [],
       held: s.held ?? [],
     };
   } catch {
-    return { known: {}, tableTick: 0, seen: [], awaitingNew: [], held: {} };
+    return {
+      known: {},
+      tableTick: 0,
+      seen: [],
+      types: [],
+      awaitingNew: [],
+      held: {},
+    };
   }
 }
