@@ -181,6 +181,89 @@ describe("offering objects for TimeZero to pull", () => {
     }
   });
 
+  // TimeZero's table from MinTick, as a pull of ours sees it.
+  const tzTable = (peer: TimeZeroPeer, objects: Record<string, number>) =>
+    recordRequests(peer, (p) => {
+      if (p.includes("GetLock")) return { status: 202, body: "" };
+      const min = Number(/MinTick=(\d+)/.exec(p)?.[1] ?? NaN);
+      if (Number.isNaN(min)) return { status: 200, body: "" };
+      const table: UserObjectTableDto = {
+        CurrentTick: 33440,
+        SyncTicks: "",
+        RemainingToSync: 0,
+        Objects: Object.entries(objects)
+          .filter(([, tick]) => tick > min)
+          .map(([guid, tick]) => ({
+            Guid: guid,
+            Tick: tick,
+            Values: formatRow(routeRow("A")),
+            PointsValues: null,
+          })),
+        Layers: [],
+      };
+      return { status: 200, body: JSON.stringify(table) };
+    });
+  test("finds TimeZero's copy of an offer it pulled but did not send back", async () => {
+    const peer = makePeer();
+    const { call, close } = await serve(peer);
+    try {
+      await call("POST", "/LanSynchronizationApi/UserObject", {
+        CurrentTick: 33430,
+        SyncTicks: "",
+        RemainingToSync: 0,
+        Objects: [],
+        Layers: [],
+      });
+      peer.offer([{ guid: ROUTE_GUID, values: routeRow("A"), points: null }]);
+      // TimeZero pulls the offer, keeps it as tick 33432, and pushes a table
+      // that says nothing of it but is already past it.
+      await call(
+        "GET",
+        "/LanSynchronizationApi/UserObject?MinTick=33000&Limit=5000",
+      );
+      await call("POST", "/LanSynchronizationApi/UserObject", {
+        CurrentTick: 33440,
+        SyncTicks: "",
+        RemainingToSync: 0,
+        Objects: [],
+        Layers: [],
+      });
+      expect(peer.isPending(ROUTE_GUID)).toBe(true);
+      const calls = tzTable(peer, { [ROUTE_GUID]: 33432 });
+      peer.onBeacon(tzBeacon({ table: 33440 }), TZ_ADDRESS);
+      await flush();
+      expect(calls.filter((c) => c.includes("UserObject"))).toHaveLength(1);
+      expect(peer.isPending(ROUTE_GUID)).toBe(false);
+    } finally {
+      close();
+    }
+  });
+
+  test("looks for TimeZero's copies again each time it asks for a round", async () => {
+    const peer = makePeer();
+    peer.offer([{ guid: ROUTE_GUID, values: routeRow("A"), points: null }]);
+    const internals = peer as unknown as {
+      claimNow: () => boolean;
+      otherTimeZeroPresent: () => boolean;
+    };
+    internals.otherTimeZeroPresent = () => true;
+    // TimeZero has not taken it yet: its copy is the old one.
+    tzTable(peer, { [ROUTE_GUID]: 1 });
+    peer.requestRound();
+    expect(internals.claimNow()).toBe(true);
+    peer.onBeacon(tzBeacon({ table: 0 }), TZ_ADDRESS);
+    await flush();
+    expect(peer.isPending(ROUTE_GUID)).toBe(true);
+    // A round later it has.
+    tzTable(peer, { [ROUTE_GUID]: 33440 });
+    (peer as unknown as { nextClaimAt: number }).nextClaimAt = 0;
+    (peer as unknown as { lastClaim: number }).lastClaim = 0;
+    expect(internals.claimNow()).toBe(true);
+    peer.onBeacon(tzBeacon({ table: 0 }), TZ_ADDRESS);
+    await flush();
+    expect(peer.isPending(ROUTE_GUID)).toBe(false);
+  });
+
   test("claims the master role in one beacon while offers wait, so TimeZero syncs", () => {
     const peer = makePeer();
     const sent: string[] = [];
@@ -342,6 +425,9 @@ describe("reading TimeZero's routes and marks", () => {
 
   test("a full read does not take TimeZero's older copy of an offered edit as pulled", async () => {
     const peer = makePeer();
+    // Offers start once TimeZero's table is read, so they tick above it.
+    (peer as unknown as { state: { tzTableTick: number } }).state.tzTableTick =
+      33500;
     peer.offer([{ guid: ROUTE_GUID, values: routeRow("New"), points: null }]);
     recordRequests(peer, (p) =>
       p.includes("GetLock")

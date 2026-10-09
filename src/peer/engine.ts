@@ -41,6 +41,7 @@ import {
   formatUserObject,
   parseUserObject,
   type UserObject,
+  type UserObjectDto,
   type UserObjectTableDto,
 } from "../protocol/userObject.js";
 import { loadState, saveState, type PeerState } from "./state.js";
@@ -110,7 +111,8 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
   private busy = false;
   private started = false;
   private caughtUpThisSession = false;
-  // Where a requested full read of TimeZero's table has got to.
+  // Where a requested read of TimeZero's table has got to: a full read, or a
+  // look for TimeZero's copies of the objects it was offered.
   private readFrom: number | null = null;
 
   constructor(private readonly opts: PeerOptions) {
@@ -248,7 +250,20 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     this.lastClaim = now;
     this.nextClaimAt = now + ROUND_RETRY_MS;
     this.opts.debug("asking TimeZero for a sync round");
+    // A round can leave TimeZero holding an object without our hearing so:
+    // look for its copies of the waiting offers too.
+    this.readOffersBack(Object.values(this.state.offered));
     return true;
+  }
+
+  // TimeZero does not always send an object it pulled straight back (an area
+  // it kept quiet about), and the table tick it reports can already be past
+  // its copy. Read its table from the lowest of these offers: a copy ticked
+  // above the offer is the confirmation.
+  private readOffersBack(offers: UserObjectDto[]): void {
+    if (!offers.length) return;
+    const lowest = Math.min(...offers.map((o) => o.Tick));
+    this.readFrom = Math.min(this.readFrom ?? lowest, lowest);
   }
 
   // ---- discovery ----------------------------------------------------------
@@ -562,8 +577,10 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
       // TimeZero sends an object it pulled from us straight back under its
       // own tick, in the same round: that is the confirmation it has it. A
       // full read also returns TimeZero's older copy of an object we offer
-      // an edit of, which confirms nothing.
-      if (!fullRead && this.state.offered[dto.Guid]) {
+      // an edit of, which confirms nothing: only a copy ticked above the
+      // offer does.
+      const offer = this.state.offered[dto.Guid];
+      if (offer && (!fullRead || dto.Tick > offer.Tick)) {
         delete this.state.offered[dto.Guid];
         pulled.push(dto.Guid);
       }
@@ -598,11 +615,13 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
     const newer = Object.values(this.state.offered)
       .filter((o) => o.Tick > minTick)
       .sort((a, b) => a.Tick - b.Tick);
+    const served = newer.slice(0, limit);
+    this.readOffersBack(served);
     return {
       CurrentTick: this.servedTick,
       SyncTicks: "",
       RemainingToSync: Math.max(0, newer.length - limit),
-      Objects: newer.slice(0, limit),
+      Objects: served,
       Layers: [],
     };
   }
@@ -650,7 +669,11 @@ export class TimeZeroPeer extends EventEmitter<PeerEvents> {
           return json(200, table);
         }
         if (path === `${API}/UserObject` && req.method === "POST") {
-          this.acceptObjects(JSON.parse(body) as UserObjectTableDto);
+          const table = JSON.parse(body) as UserObjectTableDto;
+          this.opts.debug(
+            `TimeZero sends ${table.Objects.length} object(s), table tick ${table.CurrentTick}`,
+          );
+          this.acceptObjects(table);
           return res.writeHead(201).end();
         }
         if (
