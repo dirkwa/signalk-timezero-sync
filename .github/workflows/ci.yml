@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   plugin-ci:
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@144d4bc8591c3a54465baf6736f4a20e245d057f # master
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@340d5bb62c17ec58d2a3497dbbf081cd87af2a96 # master
     with:
       # eslint, prettier and tsc; plugin-ci runs this through eval.
       format-check-command: npm run ci-lint && npm run typecheck
