@@ -70,6 +70,10 @@ of it.
   honoured. Areas are ObjectType 8 with their corners as a
   polyline blob; TimeZero holds 100 areas and lines together, of up to 50
   corners.
+- ObjectType 9 is a weather routing result, not a track: named "Opt nnnn",
+  with a speed and an ETA in 3-hour steps on every point (confirmed live, 286
+  of them, all deleted). Own-ship tracks are neither in the UserObject table
+  nor on the diagnostics page, so they cannot be synced.
 - Timestamps count seconds from 2000-01-01. GUIDs travel in .NET byte order.
 
 ## What the Signal K side must not do
