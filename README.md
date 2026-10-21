@@ -117,7 +117,10 @@ nor lets its older state overwrite a newer one.
   error). So raise a MOB from Signal K (for example Freeboard) when both should
   have it.
 - TimeZero marks, routes and areas in user layers are left alone.
-- Circles, lines, events and tracks are not synced.
+- Circles and lines drawn in TimeZero, events and weather routing results are
+  not synced.
+- Tracks cannot be synced: TimeZero keeps its tracks out of its LAN sync, so
+  they never reach Signal K. Record the track in Signal K instead.
 - TimeZero has no reverse flag, so a route followed in reverse in Signal K is not
   sent to TimeZero.
 - TimeZero's anchor watch is a circle; polygon and sector anchor zones are not

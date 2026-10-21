@@ -49,7 +49,9 @@ export const POINT_COLUMN = {
 const POINT_COLUMN_COUNT = 11;
 
 // ObjectType values seen on a live TZ Professional, matched against the
-// counts on its sync diagnostics page.
+// counts on its sync diagnostics page. A routing result is a weather route
+// ("Opt nnnn") with a speed and an ETA per point. Own-ship tracks are not in
+// the sync at all.
 export const OBJECT_TYPE = {
   mark: 0,
   circle: 3,
@@ -57,7 +59,7 @@ export const OBJECT_TYPE = {
   route: 5,
   event: 7,
   area: 8,
-  track: 9,
+  routingResult: 9,
 } as const;
 
 // The wire shape of one object in a UserObject table read or push.
